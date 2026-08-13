@@ -16,12 +16,13 @@ Hard rules for this session:
   do not enter optimization iterations — the orchestrator spawns those as separate sessions afterwards.
 - **Do NOT loop.** One pass: research → implement → validate → bench → record → commit, then exit.
 - The whole point of a clean session is a fresh context: you inherit state from disk, not from a prior conversation.
-- **The host GPU boundary is non-negotiable.** Never run `python test_kernel.py`, `python kernel.py`, or
+- **The host accelerator boundary is non-negotiable.** Never run `python test_kernel.py`, `python kernel.py`, or
   `python -c "import kernel"` directly in the workspace, even as a quick smoke/import check. Always route
   the command through `python tools/sandbox.py ... --`; the orchestrator terminates the whole session on a
   direct kernel import or execution. Never import or execute `flashinfer`, `flash_attn`/`flash-attn`, or
   `xformers` or `vllm` on the host either: a preinstalled package can start `ninja`, `ptxas`, or `nvcc` on first use.
-  Inspect their source statically, or route the import/API probe through the sandbox.
+  Inspect their source statically, or route the import/API probe through the sandbox. The same rule applies
+  to `torch_npu` and CANN/AscendC imports that can initialize an NPU or invoke a compiler.
 - **The gateway is shared orchestrator-owned infrastructure.** Never start/stop/restart/signal its service or
   `screen` session, never delete/edit its configured state directory or job database/log, and never cancel gateway jobs
   directly. If unavailable, record an infrastructure failure and exit; do not repair it from this session.
@@ -33,6 +34,18 @@ Hard rules for this session:
   `solution.json` entry such as `kernel.cu::run` cannot be versioned by the campaign. Embed the self-authored CUDA
   source in `kernel.py` and use an in-process loader supported by the sandbox; prefer
   `cuda.bindings`/NVRTC because SOL GPU workers block `torch.utils.cpp_extension.load_inline`.
+- **AscendC campaigns may use declared multi-source candidates.** Keep the evaluator-facing Python entry
+  point in `kernel.py`, and list every self-authored `.cpp`, `.h`, and `.asc` source required to compile or
+  launch it in `solution.json.sources`. Undeclared side files and prebuilt operator binaries are not part of
+  the candidate and must not be loaded.
+- **AscendC CANN 8.5 build contract:** the official fast-kernel-launch route may declare `CMakeLists.txt`
+  alongside the self-authored sources and build it on first evaluator load. If Python build plumbing is
+  needed, the only permitted process call is a direct literal argv such as
+  `subprocess.run(["cmake", "-S", ...], check=True)` followed by
+  `subprocess.run(["cmake", "--build", ...], check=True)`. The gateway already has the CANN environment.
+  Never invoke `bash`/`sh`, use `shell=True`, construct a command string, source an environment script, or
+  execute any program other than `cmake` from candidate Python. Declare `CMakeLists.txt` in
+  `solution.json.sources` so the complete build recipe is reviewed and uploaded.
 - **Do not delegate computation to a third-party kernel/operator library.** An independent policy agent
   reviews non-standard imports, declared dependencies, and library references by inspecting their actual
   use. Compiler/header/ABI/launch plumbing for the self-authored kernel may be accepted; prebuilt compute,
@@ -54,17 +67,23 @@ Hard rules for this session:
 {{EVALUATOR}}
 
 The campaign dependency environment is immutable. Never run `pip`, `python -m pip`, `uv pip`, `conda`,
-`setup.py`, or any other package installation/build command on the host or through the gateway. Use only
-preinstalled dependencies. If an import is unavailable, record the blocker or choose an implementation that
-uses available tooling; do not install or locally compile a third-party library.
-Do not import or execute JIT-capable GPU package code directly on the host. Even a preinstalled package such
+or any package installation command on the host or through the gateway. Use only preinstalled dependencies.
+An AscendC campaign may invoke the preinstalled CANN compiler/build tooling through the gateway solely to
+compile the candidate's declared, self-authored sources; it must not install or compile a third-party library.
+If an import is unavailable, record the blocker or choose an implementation that uses available tooling.
+Do not import or execute JIT-capable accelerator package code directly on the host. Even a preinstalled package such
 as `flashinfer`, `flash_attn`/`flash-attn`, `xformers`, or `vllm` can invoke `ninja`, `ptxas`, or `nvcc` on first use.
-Static source inspection is allowed. Route any import/API probe/benchmark that may initialize GPU code
-through `tools/sandbox.py`.
+`torch_npu` or a CANN/AscendC binding can likewise initialize the NPU or compiler. Static source inspection is
+allowed. Route any import/API probe/benchmark that may initialize accelerator code
+through `tools/sandbox.py`. In particular, never run `python -c "import torch_npu ..."` on the host, even to
+find its package path. Use static discovery without importing it when absolutely necessary:
+`python -c "import importlib.util; print(importlib.util.find_spec('torch_npu').submodule_search_locations)"`.
+Runtime code in `kernel.py` may inspect `torch_npu.__file__` because the evaluator imports it inside the gateway.
 
 ## Definition of done (the orchestrator mechanically re-checks all of it)
 
-1. `kernel.py` differs from the V0 wrapper and implements the GPU computation directly in `{{FRAMEWORK}}`.
+1. `kernel.py` differs from the V0 wrapper and, together with any files declared by
+   `solution.json.sources`, implements the accelerator computation directly in `{{FRAMEWORK}}`.
 2. No forbidden dependency or PyTorch compute call remains; `solution.json` declares only PyTorch/evaluator
    plumbing plus `{{FRAMEWORK}}`.
 3. For a Triton campaign: **plain Triton only.** Gluon is a later orchestrator-owned escalation.
@@ -87,11 +106,19 @@ dtypes, layouts, and the full shape set you must cover.
 2. **Architecture-scoped L1 retrieval**: Read the target architecture from workspace `README.md`, then query
    main's architecture-first wiki before broad grep. Open the returned pages and follow their local links:
    ```bash
-   python3 gpu-wiki/scripts/query.py --arch <arch> --vendor <nvidia|amd> \
+   python3 gpu-wiki/scripts/query.py --arch <arch> --vendor <nvidia|amd|ascend> \
      --area docs --dsl <dsl> --operator <operator> \
      --section ref-docs --section pitfalls
    python3 gpu-wiki/scripts/query.py <operator-or-mechanism> --arch <arch> \
-     --vendor <nvidia|amd> --dsl <dsl> --area reference-kernels --kind kernel
+     --vendor <nvidia|amd|ascend> --dsl <dsl> --area reference-kernels --kind kernel
+   ```
+   For an Ascend 910B1 campaign, do not substitute a CUDA/ROCm scope; use the Ascend filters explicitly:
+   ```bash
+   python3 gpu-wiki/scripts/query.py --arch ascend910b1 --vendor ascend \
+     --area docs --dsl ascendc --operator <operator> \
+     --section ref-docs --section pitfalls
+   python3 gpu-wiki/scripts/query.py <operator-or-mechanism> --arch ascend910b1 \
+     --vendor ascend --dsl ascendc --area reference-kernels --kind kernel
    ```
    Omit `--area` only when combined docs/reference results are useful. Narrow
    reference results with `--source`, `--status`, or `--kind`; test/build/package
@@ -105,7 +132,10 @@ dtypes, layouts, and the full shape set you must cover.
      after those P0-P4 sources are insufficient, use the runtime's available `KernelWiki` skill or
      `gpu-wiki/3rdparty/` as P5 sources for NVIDIA SM90/SM100.
    - **L2 (reference-projects)**: Only if L1 yields no new actionable path. Search relevant modules in
-     `reference-projects/` for implementation patterns.
+     `reference-projects/` for implementation patterns. For AscendC, search in this order:
+     `ops-nn` -> `vllm-ascend` -> `cann-ops`. Treat repositories distributed under the Ascend Open Source
+     Software License Agreement (OSLA) as **reference-only**: learn API usage and structural patterns, but
+     do not copy source verbatim, load their implementations, or turn them into candidate dependencies.
    - **L3 (public web)**: Only if L1+L2 yield nothing new. Use web search for papers, docs, or community posts.
 4. **Stop early**: once you have **one** viable implementation approach with a concrete reference, start
    implementing. Do not exhaustively search all layers.
@@ -114,20 +144,32 @@ dtypes, layouts, and the full shape set you must cover.
 
 ## Step C — Implement and validate
 
-Write one self-contained `{{FRAMEWORK}}` implementation of the whole operator in `kernel.py`, keeping the
-evaluator-facing entry point (`Model` / `run`) exactly as the harness expects. Purity checklist:
+Write one self-contained `{{FRAMEWORK}}` implementation of the whole operator, keeping the evaluator-facing
+entry point (`Model` / `run`) in `kernel.py` exactly as the harness expects. A CUDA candidate stays in
+`kernel.py`; an AscendC candidate may additionally use only the `.cpp`, `.h`, and `.asc` files declared in
+`solution.json.sources`. Purity checklist:
 
 - Only these imports: stdlib, `torch` (plumbing/allocation only), and the selected framework's own modules.
+  For AscendC, `torch_npu` and CANN runtime/compiler bindings are allowed only as transparent allocation,
+  compilation, or launch plumbing for the self-authored kernel, never as delegated compute.
 - No `torch` compute calls (`matmul`, `mm`, `bmm`, `softmax`, `exp`, `sum`, `mean`, `layer_norm`,
-  `scaled_dot_product_attention`, the `@` operator, …), no `torch.nn.functional`, no `torch.ops`,
+  `scaled_dot_product_attention`, the `@` operator, …), no `torch.nn.functional`,
   no `torch.linalg`, no `_scaled_mm`.
+- `torch.ops` is forbidden except in AscendC, where `torch.ops.load_library` and a narrowly named custom
+  namespace (`atrex_*`, `ascendc_*`, or `custom*`) may only load/launch the declared self-authored kernel.
 - No delegation to third-party kernel/operator implementations (`flashinfer`, `flash_attn`, `xformers`,
   `vllm`, `sglang`, `bitsandbytes`, cuBLAS/cuDNN wrappers, or prebuilt CUTLASS kernels). Non-compute
   toolchain/plumbing dependencies must have a clear, inspectable purpose for the independent reviewer.
 - For CUDA, `kernel.py` itself must contain both the self-authored `__global__` source and its in-process
   loader. Do not redirect the evaluated entry point to a separately compiled `kernel.cu` source.
+- For AscendC, keep `kernel.py` as the Python harness/launch entry point and declare every self-authored
+  kernel, tiling, and host-glue `.cpp`, `.h`, or `.asc` file in `solution.json.sources` using relative paths.
+  Do not reference files outside the candidate or hide computation in an installed custom operator.
+- For AscendC CMake/Bisheng integration, declare `CMakeLists.txt` as a source and call `cmake` directly with
+  literal argv lists and `check=True`. Do not call a shell or source CANN setup scripts; the gateway provides
+  the CANN environment. A candidate containing `subprocess.run(["bash", "-c", ...])` is mechanically rejected.
 - Update `solution.json` so its languages and dependencies list only PyTorch/evaluator plumbing plus
-  `{{FRAMEWORK}}`.
+  `{{FRAMEWORK}}`; for AscendC, its `sources` list must cover the complete multi-source candidate.
 
 **Correctness validation** — immediately after editing:
 ```bash
@@ -184,11 +226,15 @@ Fill in `performance`, `correctness`, `search_log` (sources consulted and what e
 past it — this is the highest-value field for the whole campaign), `open_directions` (≤3 optimization leads
 for the next session, most promising first), and `git_commit_hash`.
 
-Then commit only your own outputs:
+Then commit only your own outputs. For AscendC, add every relative `.cpp`, `.h`, and `.asc` path declared
+in `solution.json.sources` in addition to the files shown below:
 ```bash
-git add kernel.py solution.json memory/v{{N}}.json plans/v{{N}}_framework_baseline.md && \
-  git commit -m "v{{N}}: framework baseline ({{FRAMEWORK}})"
+git add kernel.py solution.json memory/v{{N}}.json plans/v{{N}}_framework_baseline.md
+# AscendC only: explicitly stage every additional solution.json.sources[].path here.
+git commit -m "v{{N}}: framework baseline ({{FRAMEWORK}})"
 ```
+Before the commit, AscendC campaigns must also run `git add --` with the actual declared source paths and
+verify that every `solution.json.sources[].path` appears in the staged file list.
 
 ## Finish
 

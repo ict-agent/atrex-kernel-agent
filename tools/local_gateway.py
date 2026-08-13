@@ -67,11 +67,14 @@ ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_BODY_LIMIT = 32 * 1024 * 1024
 DEFAULT_OUTPUT_LIMIT = 32 * 1024 * 1024
 DEFAULT_JOB_TIMEOUT = 600
-MAX_JOB_TIMEOUT = 600
+# Keep normal jobs bounded by the 600 second default, but allow an explicit
+# longer allocation for verification jobs that perform two cold compiler
+# starts (one incumbent and one candidate) before ABBA timing.
+MAX_JOB_TIMEOUT = 1800
 MAX_SOURCE_BYTES = 24 * 1024 * 1024
 MAX_PROFILE_COUNTERS = 256
 PROFILE_LEVELS = frozenset({"survey", "sol", "deep"})
-PROFILE_TOOLS = frozenset({"ncu", "rocprofv3"})
+PROFILE_TOOLS = frozenset({"ncu", "rocprofv3", "msprof"})
 
 
 def _json_dumps(value: Any) -> str:
@@ -495,7 +498,7 @@ def _validate_typed_request(payload: Any, kind: str) -> dict[str, Any]:
             raise ValueError("level must be one of: survey, sol, deep")
         profiler = payload.get("profiler")
         if profiler is not None and profiler not in PROFILE_TOOLS:
-            raise ValueError("profiler must be 'ncu' or 'rocprofv3'")
+            raise ValueError("profiler must be 'ncu', 'rocprofv3', or 'msprof'")
         counters = payload.get("counters") or []
         if not isinstance(counters, list) or len(counters) > MAX_PROFILE_COUNTERS or not all(
             isinstance(counter, str) and counter.strip() and len(counter) <= 512
@@ -675,7 +678,7 @@ from atrex_bench.eval._runtime import (
     load_shape_init_inputs,
     load_shape_spec,
     resolve_input_module,
-    sync_device,
+    sync_device as runtime_sync_device,
     validate_reference_module,
 )
 
@@ -686,7 +689,19 @@ shapes = json.loads((root / "reference" / "shapes.json").read_text(encoding="utf
 shape_id = os.environ.get("ATREX_PROFILE_SHAPE_ID") or sorted(
     (str(value) for value in shapes), key=lambda value: (not value.isdigit(), int(value) if value.isdigit() else value)
 )[0]
-device = torch.device("cuda")
+device_name = os.environ.get("PROFILE_DEVICE")
+torch_npu = None
+if device_name is None or device_name.split(":", 1)[0].lower() == "npu":
+    try:
+        import torch_npu
+    except ImportError:
+        torch_npu = None
+if device_name is None:
+    npu = getattr(torch, "npu", None)
+    if npu is None and torch_npu is not None:
+        npu = getattr(torch_npu, "npu", None)
+    device_name = "npu:0" if npu is not None and npu.is_available() else "cuda"
+device = torch.device(device_name)
 reference_module = import_module_from_path(reference_path, "atrex_profile_reference")
 validate_reference_module(reference_module)
 input_module = resolve_input_module(reference_path, reference_module, module_prefix="atrex_profile_input")
@@ -697,16 +712,29 @@ candidate = instantiate_model_module(
 ).model
 call_inputs = load_shape_call_inputs(input_module, shape, device)
 
+def synchronize():
+    if device.type == "npu":
+        npu = getattr(torch, "npu", None)
+        if npu is None and torch_npu is not None:
+            npu = getattr(torch_npu, "npu", None)
+        if npu is None or not callable(getattr(npu, "synchronize", None)):
+            raise RuntimeError("PROFILE_DEVICE=npu requires torch.npu/torch_npu.npu synchronize()")
+        npu.synchronize()
+    else:
+        runtime_sync_device(device)
+
 with torch.inference_mode():
     for _ in range(int(os.environ.get("ATREX_PROFILE_WARMUP", "3"))):
         current = clone_model_inputs(call_inputs)
         candidate(*current.args, **current.kwargs)
-    sync_device(device)
-    torch.cuda.cudart().cudaProfilerStart()
+    synchronize()
+    if device.type == "cuda":
+        torch.cuda.cudart().cudaProfilerStart()
     current = clone_model_inputs(call_inputs)
     candidate(*current.args, **current.kwargs)
-    sync_device(device)
-    torch.cuda.cudart().cudaProfilerStop()
+    synchronize()
+    if device.type == "cuda":
+        torch.cuda.cudart().cudaProfilerStop()
 '''
 
 
@@ -861,18 +889,91 @@ def _parse_rocprof_csv(directory: Path, *, level: str, top_kernels: int | None) 
     return result
 
 
+def _parse_msprof_artifacts(directory: Path, *, level: str) -> dict[str, Any]:
+    """Describe retained msprof output without guessing at version-specific schemas."""
+    artifacts: list[dict[str, Any]] = []
+    total_bytes = 0
+    artifact_count = 0
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        artifact_count += 1
+        total_bytes += size
+        if len(artifacts) < 1000:
+            artifacts.append(
+                {
+                    "path": path.relative_to(directory).as_posix(),
+                    "size_bytes": size,
+                }
+            )
+    result: dict[str, Any] = {
+        "profiler": "msprof",
+        "level": level,
+        "metrics_status": "unavailable",
+        "artifact_root": str(directory),
+        "artifact_count": artifact_count,
+        "artifact_bytes": total_bytes,
+        "artifacts": artifacts,
+        "note": (
+            "CANN msprof op artifacts were retained, but structured metric parsing "
+            "is unavailable because the output schema is CANN-version dependent"
+        ),
+    }
+    if artifact_count > len(artifacts):
+        result["artifacts_truncated"] = True
+    return result
+
+
 def _find_profile_tool(name: str, env: dict[str, str]) -> str | None:
     discovered = shutil.which(name, path=env.get("PATH"))
     if discovered:
         return discovered
-    configured = env.get("NCU_BIN" if name == "ncu" else "ROCPROFV3_BIN")
+    configured_name = {
+        "ncu": "NCU_BIN",
+        "rocprofv3": "ROCPROFV3_BIN",
+        "msprof": "MSPROF_BIN",
+    }.get(name)
+    configured = env.get(configured_name) if configured_name else None
     candidates = [Path(configured)] if configured else []
     if name == "ncu":
         candidates.extend((Path("/usr/local/cuda/bin/ncu"),))
         candidates.extend(sorted(Path("/usr/local").glob("cuda-*/bin/ncu"), reverse=True))
-    else:
+    elif name == "rocprofv3":
         candidates.extend((Path("/opt/rocm/bin/rocprofv3"), Path("/usr/bin/rocprofv3")))
+    elif name == "msprof":
+        candidates.extend(
+            (
+                Path("/usr/local/Ascend/ascend-toolkit/latest/bin/msprof"),
+                Path("/usr/local/Ascend/cann-8.5.0/bin/msprof"),
+            )
+        )
+        candidates.extend(
+            sorted(Path("/usr/local/Ascend").glob("cann-*/bin/msprof"), reverse=True)
+        )
+        candidates.extend(
+            sorted(
+                Path("/usr/local/Ascend").glob("ascend-toolkit/*/bin/msprof"),
+                reverse=True,
+            )
+        )
     for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _find_npu_smi(env: dict[str, str]) -> str | None:
+    discovered = shutil.which("npu-smi", path=env.get("PATH"))
+    if discovered:
+        return discovered
+    for candidate in (
+        Path("/usr/local/bin/npu-smi"),
+        Path("/usr/local/Ascend/driver/tools/npu-smi"),
+    ):
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return None
@@ -885,7 +986,16 @@ def _auto_profile_tool(env: dict[str, str]) -> str:
             [
                 sys.executable,
                 "-c",
-                "import torch; print('rocprofv3' if torch.version.hip else 'ncu')",
+                (
+                    "import torch\n"
+                    "try:\n import torch_npu\nexcept ImportError:\n torch_npu=None\n"
+                    "npu=getattr(torch,'npu',None) or "
+                    "(getattr(torch_npu,'npu',None) if torch_npu else None)\n"
+                    "value=('msprof' if npu is not None and npu.is_available() else "
+                    "(('rocprofv3' if getattr(torch.version,'hip',None) else 'ncu') "
+                    "if torch.cuda.is_available() else 'unknown'))\n"
+                    "print(value)"
+                ),
             ],
             env=env,
             capture_output=True,
@@ -902,10 +1012,12 @@ def _auto_profile_tool(env: dict[str, str]) -> str:
         if _find_profile_tool(preferred, env):
             return preferred
         raise FileNotFoundError(f"auto-selected profiler {preferred!r} is not available")
-    for candidate in ("ncu", "rocprofv3"):
+    if _find_npu_smi(env) and _find_profile_tool("msprof", env):
+        return "msprof"
+    for candidate in ("ncu", "rocprofv3", "msprof"):
         if _find_profile_tool(candidate, env):
             return candidate
-    raise FileNotFoundError("neither ncu nor rocprofv3 is available in PATH")
+    raise FileNotFoundError("none of ncu, rocprofv3, or msprof is available in PATH")
 
 
 class LocalScheduler:
@@ -1024,7 +1136,11 @@ class LocalScheduler:
                 # The active interpreter and its sibling tools must make that same
                 # toolchain the default for worker commands.  Invoking an
                 # interpreter by absolute path does not otherwise update PATH.
-                python_bin = str(Path(sys.executable).resolve().parent)
+                # Preserve a venv launcher path. Resolving the symlink here
+                # silently falls back to the base interpreter's bin directory,
+                # so dev jobs invoking `python` can lose torch/torch_npu even
+                # though the gateway itself was started from that venv.
+                python_bin = str(Path(sys.executable).parent)
                 path_parts = [
                     part for part in env.get("PATH", "").split(os.pathsep)
                     if part and part != python_bin
@@ -1237,6 +1353,7 @@ class LocalScheduler:
         profiler = request.get("profiler")
         if profiler is None:
             profiler = _auto_profile_tool(env)
+        request["_resolved_profiler"] = profiler
         executable = _find_profile_tool(profiler, env)
         if executable is None:
             raise FileNotFoundError(f"requested profiler {profiler!r} is not available in PATH")
@@ -1263,6 +1380,26 @@ class LocalScheduler:
                 argv += ["--kernel-name", f"regex:{kernel_regex}"]
             argv += [sys.executable, str(driver)]
             return argv
+
+        if profiler == "msprof":
+            if counters:
+                raise ValueError(
+                    "custom counters are not mapped to CANN 8.5 'msprof op'; "
+                    "run the wrapper in dev mode to use version-specific options"
+                )
+            if kernel_regex:
+                raise ValueError(
+                    "kernel_regex is not mapped to CANN 8.5 'msprof op'; "
+                    "run the wrapper in dev mode to use version-specific options"
+                )
+            env.setdefault("PROFILE_DEVICE", "npu:0")
+            return [
+                executable,
+                "op",
+                f"--output={output_dir}",
+                sys.executable,
+                str(driver),
+            ]
 
         argv = [
             executable,
@@ -1430,10 +1567,14 @@ class LocalScheduler:
                 return
             level = request.get("level", "sol")
             top_kernels = request.get("top_kernels")
-            profiler = request.get("profiler")
+            profiler = request.get("_resolved_profiler") or request.get("profiler")
             ncu_csv = workdir / "profile_output" / "ncu.csv"
             if profiler == "ncu" or (profiler is None and ncu_csv.is_file()):
                 result = _parse_ncu_csv(ncu_csv, level=level, top_kernels=top_kernels)
+            elif profiler == "msprof":
+                result = _parse_msprof_artifacts(
+                    workdir / "profile_output", level=level
+                )
             else:
                 result = _parse_rocprof_csv(
                     workdir / "profile_output", level=level, top_kernels=top_kernels
@@ -1549,6 +1690,85 @@ class LocalGateway:
             return result
 
 
+def _ascend_arch_token(model: str) -> str | None:
+    compact = re.sub(r"[^a-z0-9]", "", model.lower())
+    if compact.startswith("ascend910"):
+        return compact
+    if compact.startswith("910"):
+        return f"ascend{compact}"
+    return None
+
+
+def _parse_npu_smi_info(output: str) -> dict[str, Any]:
+    """Extract stable identity fields from the table/text variants of npu-smi info."""
+    model_match = re.search(r"(?i)\b(?:ascend[\s_-]*)?(910[a-z0-9-]*)\b", output)
+    if model_match is None:
+        raise ValueError("npu-smi output did not contain an Ascend 910 device name")
+    product = model_match.group(1).upper()
+    totals = [
+        int(match.group(1))
+        for match in re.finditer(r"(?m)\b\d+\s*/\s*(\d+)\s*(?:Mi?B)?\b", output)
+    ]
+    driver_match = re.search(
+        r"(?im)\bdriver\s+version\s*[:=]\s*([^\s|]+)", output
+    )
+    if driver_match is None:
+        driver_match = re.search(r"(?im)\bversion\s*[:=]\s*([^\s|]+)", output)
+    return {
+        "gpu_model": f"Ascend {product}",
+        "arch": _ascend_arch_token(product),
+        "total_memory_mb": max(totals) if totals else None,
+        "driver_version": driver_match.group(1) if driver_match else None,
+    }
+
+
+_TORCH_DEVICE_PROBE = r'''
+import json
+import torch
+
+try:
+    import torch_npu
+except ImportError:
+    torch_npu = None
+
+npu = getattr(torch, "npu", None)
+if npu is None and torch_npu is not None:
+    npu = getattr(torch_npu, "npu", None)
+
+if npu is not None and npu.is_available():
+    get_name = getattr(npu, "get_device_name", None)
+    get_properties = getattr(npu, "get_device_properties", None)
+    properties = get_properties(0) if callable(get_properties) else None
+    model = get_name(0) if callable(get_name) else getattr(properties, "name", "Ascend NPU")
+    total_memory = getattr(properties, "total_memory", None)
+    print(json.dumps({
+        "vendor": "ascend",
+        "model": model,
+        "arch": model,
+        "sm_count": getattr(properties, "multi_processor_count", None),
+        "total_memory_mb": int(total_memory / (1024 * 1024)) if total_memory else None,
+        "torch": torch.__version__,
+        "runtime": getattr(torch_npu, "__version__", None) if torch_npu else None,
+    }))
+else:
+    properties = torch.cuda.get_device_properties(0)
+    hip = getattr(torch.version, "hip", None)
+    arch = (
+        getattr(properties, "gcnArchName", "").split(":")[0]
+        if hip else "sm_%d%d" % torch.cuda.get_device_capability(0)
+    )
+    print(json.dumps({
+        "vendor": "amd" if hip else "nvidia",
+        "model": properties.name,
+        "arch": arch,
+        "sm_count": properties.multi_processor_count,
+        "total_memory_mb": int(properties.total_memory / (1024 * 1024)),
+        "torch": torch.__version__,
+        "runtime": hip or torch.version.cuda,
+    }))
+'''
+
+
 def _probe_environment() -> dict[str, Any]:
     info: dict[str, Any] = {
         "gpu": "local",
@@ -1589,32 +1809,57 @@ def _probe_environment() -> dict[str, Any]:
     except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
         errors.append(f"nvidia-smi: {exc}")
 
+    npu_smi = _find_npu_smi(os.environ.copy())
+    if npu_smi is not None:
+        try:
+            result = subprocess.run(
+                [npu_smi, "info"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+            npu_info = _parse_npu_smi_info(result.stdout)
+            if info["vendor"] == "unknown":
+                info.update(
+                    vendor="ascend",
+                    gpu_model=npu_info["gpu_model"],
+                    arch=npu_info["arch"],
+                    total_memory_mb=npu_info["total_memory_mb"],
+                    driver_version=npu_info["driver_version"],
+                    source="probe",
+                )
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
+            errors.append(f"npu-smi: {exc}")
+    else:
+        errors.append("npu-smi: not found")
+
     try:
-        code = (
-            "import json, torch; p=torch.cuda.get_device_properties(0); "
-            "hip=getattr(torch.version,'hip',None); "
-            "arch=(getattr(p,'gcnArchName','').split(':')[0] if hip else "
-            "'sm_%d%d'%torch.cuda.get_device_capability(0)); "
-            "print(json.dumps({'arch':arch,'sm_count':p.multi_processor_count,"
-            "'torch':torch.__version__,'runtime':hip or torch.version.cuda}))"
-        )
         result = subprocess.run(
-            [sys.executable, "-c", code],
+            [sys.executable, "-c", _TORCH_DEVICE_PROBE],
             capture_output=True,
             text=True,
             timeout=20,
             check=True,
         )
         runtime = json.loads(result.stdout)
-        info["arch"] = runtime["arch"]
-        info["sm_count"] = runtime["sm_count"]
+        vendor = runtime["vendor"]
+        model = str(runtime.get("model") or "")
+        arch = runtime["arch"]
+        if vendor == "ascend":
+            arch = _ascend_arch_token(str(arch)) or info.get("arch")
+        info.update(
+            vendor=vendor,
+            gpu_model=model or info.get("gpu_model"),
+            arch=arch,
+            sm_count=runtime.get("sm_count"),
+            total_memory_mb=runtime.get("total_memory_mb") or info.get("total_memory_mb"),
+            source="probe",
+        )
         info["toolchain"].update(
             torch=runtime["torch"],
             runtime=runtime["runtime"],
         )
-        info["source"] = "probe"
-        if info["vendor"] == "unknown":
-            info["vendor"] = "amd" if str(runtime["arch"]).startswith("gfx") else "nvidia"
     except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
         errors.append(f"torch: {exc}")
     if errors and info["source"] == "declared":

@@ -29,7 +29,8 @@ from .constants import (
     SANDBOX_TOOL,
     TEST_RESULT_PREFIX,
 )
-from .optimization_policy import DependencyReviewSignal
+from .hardware import normalize_arch_token
+from .optimization_policy import DependencyReviewSignal, declared_solution_source_paths
 
 
 def _status_is(value: object, expected: str) -> bool:
@@ -255,6 +256,14 @@ def _dependency_review_candidate_paths(workspace: Path) -> list[Path]:
         workspace / "kernel.py",
         workspace / "solution.json",
     ]
+    try:
+        declared = declared_solution_source_paths(workspace)
+    except ValueError:
+        # The mechanical policy pass reports the invalid manifest. Do not follow
+        # untrusted paths while collecting evidence for the independent reviewer.
+        declared = ()
+    paths.extend(workspace / relative for relative in declared)
+    paths = list(dict.fromkeys(paths))
     return [path for path in paths if path.is_file()]
 
 
@@ -452,55 +461,145 @@ def _record_local_test_result(workspace: Path, version: str, result: dict) -> Pa
     return path
 
 
+_RUNTIME_ARCH_PROBE = """\
+import torch
+
+try:
+    import torch_npu
+except Exception:
+    torch_npu = None
+
+
+def npu_device_name(api):
+    if api is None:
+        return ""
+    getter = getattr(api, "get_device_name", None)
+    if callable(getter):
+        for args in ((0,), ()):
+            try:
+                value = getter(*args)
+            except Exception:
+                continue
+            if value:
+                return str(value)
+    getter = getattr(api, "get_device_properties", None)
+    if callable(getter):
+        try:
+            properties = getter(0)
+        except Exception:
+            properties = None
+        for attribute in ("name", "device_name"):
+            value = getattr(properties, attribute, "")
+            if value:
+                return str(value)
+    return ""
+
+
+for npu_api in (
+    getattr(torch, "npu", None),
+    getattr(torch_npu, "npu", None) if torch_npu is not None else None,
+):
+    device_name = npu_device_name(npu_api)
+    if device_name:
+        print(device_name)
+        raise SystemExit(0)
+
+properties = torch.cuda.get_device_properties(0)
+if getattr(torch.version, "hip", None):
+    print(getattr(properties, "gcnArchName", "").split(":")[0])
+else:
+    capability = torch.cuda.get_device_capability(0)
+    print("sm_%d%d" % (capability[0], capability[1]))
+"""
+
+_ASCEND_910B_OUTPUT_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:(?:Huawei[ \t_-]*)?Ascend[ \t_-]*)?"
+    r"910B(?:[ \t_-]*1)?(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _arch_from_probe_output(output: str) -> str:
+    """Extract and normalize a supported architecture from probe output."""
+    for line in reversed(output.splitlines()):
+        if normalized := normalize_arch_token(line):
+            return normalized
+    if match := _ASCEND_910B_OUTPUT_RE.search(output):
+        return normalize_arch_token(match.group(0))
+    return ""
+
+
+def _completed_process_arch(result: subprocess.CompletedProcess[str]) -> str:
+    if result.returncode != 0:
+        return ""
+    return _arch_from_probe_output(result.stdout) or _arch_from_probe_output(result.stderr)
+
+
 def detect_arch(
     sandbox_hardware: str = "",
     sandbox_profile: str = "",
     sandbox_url: str = "",
 ) -> str:
-    """Return the real runtime GPU architecture token (vendor-neutral), or '' if undetectable.
+    """Return the normalized runtime accelerator architecture, or ``''``.
 
-    NVIDIA/CUDA -> 'sm_<cap>' (e.g. 'sm_103'); AMD/ROCm -> the gfx arch (e.g. 'gfx942').
-    Uses torch (get_device_capability / gcnArchName) — the AUTHORITATIVE source, which stays
-    correct even when the GPU name / vendor SMI is DESENSITIZED (e.g. a target GPU reporting a
-    generic compatibility alias).
+    NVIDIA/CUDA -> ``sm_<cap>``; AMD/ROCm -> ``gfx...``; an exact Ascend 910B1
+    name -> ``ascend910b1`` (a family-only name remains ``ascend910b``). The
+    PyTorch runtime API is authoritative: Ascend probes
+    ``torch.npu``/``torch_npu.npu`` before CUDA/ROCm. ``npu-smi info`` is used only
+    as an Ascend fallback when the Python runtime probe is unavailable.
     """
-    code = (
-        "import torch\n"
-        "p=torch.cuda.get_device_properties(0)\n"
-        "if getattr(torch.version,'hip',None):\n"
-        "    print(getattr(p,'gcnArchName','').split(':')[0])\n"
-        "else:\n"
-        "    c=torch.cuda.get_device_capability(0); print('sm_%d%d'%(c[0],c[1]))\n"
+    commands = (
+        ("PyTorch runtime", ["python", "-c", _RUNTIME_ARCH_PROBE]),
+        ("npu-smi fallback", ["npu-smi", "info"]),
     )
     if sandbox_hardware:
-        try:
-            with tempfile.TemporaryDirectory(prefix="atrex-arch-") as temp_dir:
-                result = _sandbox_command(
-                    Path(temp_dir), sandbox_hardware, sandbox_profile, sandbox_url, 120,
-                    ["python", "-c", code],
-                )
-            if result.returncode == 0:
-                for line in reversed(result.stdout.splitlines()):
-                    value = line.strip()
-                    if re.fullmatch(r"sm_\d+|gfx[0-9a-fA-F]+", value):
-                        return value
-            print(
-                f"[orchestrator] WARNING: sandbox arch detection failed on {sandbox_hardware}: "
-                f"{result.stderr[-1000:]}",
-                file=sys.stderr,
-                flush=True,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            print(f"[orchestrator] WARNING: sandbox arch detection failed: {exc}",
-                  file=sys.stderr, flush=True)
+        failures: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="atrex-arch-") as temp_dir:
+            for label, command in commands:
+                try:
+                    result = _sandbox_command(
+                        Path(temp_dir), sandbox_hardware, sandbox_profile, sandbox_url, 120,
+                        command,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    failures.append(f"{label}: {exc}")
+                    continue
+                if arch := _completed_process_arch(result):
+                    return arch
+                detail = (result.stderr or result.stdout).strip()[-1000:]
+                failures.append(f"{label}: {detail or f'exit {result.returncode}'}")
+        print(
+            f"[orchestrator] WARNING: sandbox arch detection failed on {sandbox_hardware}: "
+            + "; ".join(failures),
+            file=sys.stderr,
+            flush=True,
+        )
         return ""
 
-    for py in ("python", "python3", sys.executable):
+    seen_python: set[str] = set()
+    for python_executable in ("python", "python3", sys.executable):
+        if python_executable in seen_python:
+            continue
+        seen_python.add(python_executable)
         try:
-            out = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=120)
-            s = out.stdout.strip()
-            if s:
-                return s
+            result = subprocess.run(
+                [python_executable, "-c", _RUNTIME_ARCH_PROBE],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
         except (OSError, subprocess.SubprocessError):
             continue
-    return ""
+        if arch := _completed_process_arch(result):
+            return arch
+
+    try:
+        result = subprocess.run(
+            ["npu-smi", "info"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return _completed_process_arch(result)

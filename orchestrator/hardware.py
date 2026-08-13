@@ -5,7 +5,12 @@ import re
 import subprocess
 from pathlib import Path
 
-from .constants import AMD_FRAMEWORKS, DEFAULT_FRAMEWORKS, NVIDIA_FRAMEWORKS
+from .constants import (
+    AMD_FRAMEWORKS,
+    ASCEND_FRAMEWORKS,
+    DEFAULT_FRAMEWORKS,
+    NVIDIA_FRAMEWORKS,
+)
 from .optimization_policy import source_uses_gluon
 
 
@@ -13,20 +18,50 @@ def _hardware_token(value: object) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
 
 
+def normalize_arch_token(value: object) -> str:
+    """Return a canonical runtime architecture token, or ``''`` if unknown.
+
+    Ascend runtimes expose both family-level names (for example ``910B``) and
+    long product names such as ``Ascend910B1``. Preserve that distinction:
+    family aliases normalize to ``ascend910b`` and only an explicit B1 name
+    normalizes to ``ascend910b1``.
+    """
+    raw = str(value or "").strip().lower()
+    if match := re.fullmatch(r"sm_?(\d+)", raw):
+        return f"sm_{match.group(1)}"
+    if re.fullmatch(r"gfx[0-9a-f]+", raw):
+        return raw
+
+    token = _hardware_token(value)
+    if re.fullmatch(r"(?:(?:HUAWEI)?ASCEND)?910B1", token):
+        return "ascend910b1"
+    if re.fullmatch(r"(?:(?:HUAWEI)?ASCEND)?910B", token):
+        return "ascend910b"
+    return ""
+
+
 def hardware_vendor(platform: str, arch: str = "") -> str:
-    """Return ``nvidia``, ``amd``, or ``unknown`` for framework dispatch.
+    """Return ``nvidia``, ``amd``, ``ascend``, or ``unknown`` for dispatch.
 
     Runtime architecture is authoritative because gateway device names can be
     desensitized. Platform-name matching is only a fallback for dry runs or an
     unavailable runtime probe.
     """
-    runtime_arch = arch.strip().lower()
-    if re.fullmatch(r"sm_?\d+", runtime_arch):
+    runtime_arch = normalize_arch_token(arch)
+    if runtime_arch.startswith("sm_"):
         return "nvidia"
-    if re.fullmatch(r"gfx[0-9a-f]+", runtime_arch):
+    if runtime_arch.startswith("gfx"):
         return "amd"
+    if runtime_arch.startswith("ascend"):
+        return "ascend"
 
     token = _hardware_token(platform)
+    if (
+        re.fullmatch(r"(?:(?:HUAWEI)?ASCEND)?910B1?", token)
+        or token.startswith("ASCEND")
+        or token.startswith("HUAWEIASCEND")
+    ):
+        return "ascend"
     if re.match(r"^(?:AMD|MI\d|RADEON|INSTINCT)", token):
         return "amd"
     if re.match(
@@ -44,6 +79,8 @@ def supported_frameworks(platform: str, arch: str = "") -> tuple[str, ...]:
         return NVIDIA_FRAMEWORKS
     if vendor == "amd":
         return AMD_FRAMEWORKS
+    if vendor == "ascend":
+        return ASCEND_FRAMEWORKS
     return DEFAULT_FRAMEWORKS
 
 
@@ -119,18 +156,19 @@ def should_convert_to_gluon(
 def hardware_directive(platform: str, arch: str) -> str:
     """Authoritative, vendor-neutral hardware-identity block injected into every session.
 
-    Guards against desensitized boxes: the agent must target the real architecture from the
-    runtime API, not the (possibly faked) device name. Deliberately does NOT prescribe any
-    vendor's feature set — the agent maps the detected arch to its own codegen choices, so this
-    works on NVIDIA (Hopper/Blackwell/...) and AMD (CDNA/...) alike.
+    Guards against desensitized boxes: the agent must target the normalized runtime architecture,
+    not the (possibly faked) device name. Deliberately does NOT prescribe any vendor's feature set;
+    the agent maps the detected arch to its own codegen choices for NVIDIA, AMD, or Ascend.
     """
-    real = f"**{arch}**" if arch else "whatever the runtime GPU API reports"
+    real = f"**{arch}**" if arch else "whatever the runtime accelerator probe reports"
     return (
         "## Hardware ground truth (authoritative — read before choosing an algorithm)\n\n"
-        f"- Intended target hardware: **{platform}**. Real runtime GPU architecture: {real} — from the "
-        "runtime API (`torch.cuda.get_device_capability()` on CUDA; the device gfx arch on ROCm). This is "
-        "the ONLY source to trust for the architecture.\n"
-        "- **The GPU *name* and vendor SMI (`nvidia-smi` / `rocm-smi`) on this box may be DESENSITIZED / "
+        f"- Intended target hardware: **{platform}**. Real runtime accelerator architecture: {real} — "
+        "from the runtime API (`torch.cuda` on CUDA/ROCm; `torch.npu`/`torch_npu.npu` on Ascend), "
+        "with `npu-smi` used only as the Ascend fallback when the PyTorch probe is unavailable. This "
+        "normalized result is the source to trust for the architecture.\n"
+        "- **The accelerator *name* and vendor SMI (`nvidia-smi` / `rocm-smi` / `npu-smi`) on this box "
+        "may be DESENSITIZED / "
         "FAKED** — they can report an older or entirely different GPU than the real silicon. Do NOT infer "
         "the architecture, vendor, or feature set from the device name; if it disagrees with the runtime "
         "API, the runtime API wins.\n"

@@ -40,6 +40,10 @@ ARCH_ALIASES = {
     "mi308x": {"mi308x", "mi-308x"},
     "cdna4": {"cdna4", "gfx950", "mi355x"},
     "rdna4": {"rdna4", "gfx1250"},
+    "ascend910b": {
+        "ascend910b", "ascend-910b", "910b", "atlas-a2", "atlas-a2-training-series",
+    },
+    "ascend910b1": {"ascend910b1", "ascend-910b1", "910b1"},
 }
 ARCH_INPUT_ALIASES = {
     alias: canonical
@@ -62,6 +66,8 @@ ARCH_VENDORS = {
     "cdna4": "amd",
     "rdna4": "amd",
     "blackwell-family": "nvidia",
+    "ascend910b": "ascend",
+    "ascend910b1": "ascend",
 }
 # Product scopes inherit architecture-general pages, but product-specific pages
 # do not enter a sibling product scope. gfx942 is a deliberate family query and
@@ -71,10 +77,12 @@ ARCH_PARENTS = {
     "blackwell-ultra": "blackwell",
     "mi300x": "cdna3",
     "mi308x": "cdna3",
+    "ascend910b1": "ascend910b",
 }
 ARCH_PARENT_CHILDREN = {
     "blackwell": {"b200"},
     "cdna3": {"mi300x", "mi308x"},
+    "ascend910b": {"ascend910b1"},
 }
 ARCH_PRODUCT_SCOPES = set(ARCH_PARENTS)
 # Truly cross-architecture articles live in a vendor ``common`` directory.  A
@@ -115,9 +123,10 @@ ARCH_PATH_SCOPES = {
         "blackwell", "blackwell-geforce",
     },
 }
-VENDOR_ALIASES = {"nvidia": {"nvidia"}, "amd": {"amd"}}
+VENDOR_ALIASES = {"nvidia": {"nvidia"}, "amd": {"amd"}, "ascend": {"ascend"}}
 DSL_ALIASES = {
     "aiter": {"aiter"},
+    "ascendc": {"ascendc", "ascend-c"},
     "ck-tile": {"ck-tile", "cktile"},
     "cuda": {"cuda"},
     "cutile": {"cutile", "cu-tile"},
@@ -148,6 +157,7 @@ DEFAULT_EXCLUDED_REFERENCE_KINDS = {"test", "build", "package"}
 REFERENCE_PRODUCTS = {
     "a100", "h20", "h100", "h200", "b200", "gb200", "b300", "gb300",
     "pro5000", "rtx-pro-5000", "mi300x", "mi308x", "mi355x",
+    "ascend910b", "ascend910b1", "910b", "910b1", "atlas-a2",
 }
 # The reference tree predates product overlays in a few places. Explicit
 # architecture markers in a path narrow the physical directory scope; otherwise
@@ -169,8 +179,13 @@ REFERENCE_ARCH_MARKERS = {
     "gb200": "b200",
     "sm90": "hopper",
     "sm80": "ampere",
+    "ascend910b1": "ascend910b1",
+    "910b1": "ascend910b1",
+    "ascend910b": "ascend910b",
+    "910b": "ascend910b",
 }
 REFERENCE_DIRECTORY_SCOPES = (
+    ("ascend/ascend910b/", {"ascend910b"}),
     ("nvidia/blackwell-geforce/", {"blackwell-geforce"}),
     ("nvidia/blackwell-ultra/", {"blackwell-ultra"}),
     ("nvidia/blackwell/", {"blackwell"}),

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from .constants import (
 from .hardware import hardware_directive, kernel_is_gluon
 from .optimization_policy import (
     DependencyReviewSignal,
+    declared_solution_source_paths,
     install_workspace_policy,
     optimization_mode_directive,
     production_kernel_violations,
@@ -62,7 +64,6 @@ from .workspace_runtime import (
 )
 from .workspace_state import (
     git_head,
-    git_kernel_blob,
     git_path_blob,
     git_worktree_blob,
     head_kernel_is_initial_baseline,
@@ -789,9 +790,12 @@ class Campaign:
             + "Continue from the files already present and finish the job autonomously. Do not ask "
             + "for confirmation. Keep the algorithm you already have where it is sound, fix the "
             + "stated problem, validate correctness through the sandbox with `--multi-seed 5`, "
-            + f"write `memory/v{FRAMEWORK_BASELINE_VERSION}.json`, and commit `kernel.py`. Never "
+            + f"write `memory/v{FRAMEWORK_BASELINE_VERSION}.json`, and commit the complete candidate "
+            + "source set: `kernel.py`, `solution.json` when present, and every path declared in "
+            + "`solution.json.sources`. Never "
             + "modify `test_kernel.py`, `reference.py`, `input.py`, `shapes.json`, `memory/v0.json`, "
             + f"or create `{FRAMEWORK_BASELINE_FILE}`. Do not enter optimization iterations.\n\n"
+            + self._framework_baseline_recovery_constraints()
             + self._evaluator_directive()
             + "\n\n"
             + self._sandbox_directive()
@@ -806,6 +810,25 @@ class Campaign:
             reasoning_effort="high",
         )
         self._account(recovery, f"framework baseline recovery v{FRAMEWORK_BASELINE_VERSION}")
+
+    def _framework_baseline_recovery_constraints(self) -> str:
+        if re.sub(r"[^a-z0-9]+", "", self.framework.lower()) != "ascendc":
+            return ""
+        return (
+            "## AscendC recovery constraints (mechanically enforced)\n\n"
+            "Do not probe the host with `import torch`, `import torch_npu`, `npu-smi`, CANN compilers, "
+            "or candidate imports. All such execution must be the command after `tools/sandbox.py --`. "
+            "For package-location research without importing, use "
+            "`python -c \"import importlib.util; "
+            "print(importlib.util.find_spec('torch_npu').submodule_search_locations)\"`. "
+            "Candidate runtime may inspect `torch_npu.__file__` because it runs in the gateway.\n\n"
+            "If the candidate uses the official CMake/Bisheng fast-launch pattern, keep `CMakeLists.txt` "
+            "in `solution.json.sources` and replace every shell command with direct, checked calls: "
+            "`subprocess.run([\"cmake\", \"-S\", ...], check=True)` and "
+            "`subprocess.run([\"cmake\", \"--build\", ...], check=True)`. The gateway already "
+            "has the CANN environment. `bash`, `sh`, command strings, `shell=True`, environment-script "
+            "sourcing, and any non-`cmake` subprocess executable are forbidden.\n\n"
+        )
 
     def _record_framework_baseline_failure(self, problem: str) -> None:
         """Persist why the framework baseline was rejected, uncommitted so a reset cannot lose it."""
@@ -840,16 +863,40 @@ class Campaign:
 
     def _commit_framework_baseline(self, n: int, result: dict) -> str:
         """Commit the accepted kernel (C1) and then pin it in a metadata-only commit (C2)."""
+        if (self.workspace / "solution.json").is_file():
+            try:
+                candidate_sources = declared_solution_source_paths(self.workspace)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"cannot commit framework baseline with unsafe solution sources: {exc}"
+                ) from exc
+        else:
+            # Native/legacy NVIDIA and AMD workspaces historically did not require a
+            # solution manifest. AscendC's manifest/source requirement is enforced by
+            # the production-policy gate before this commit step.
+            candidate_sources = ()
         staged = [
             path for path in ("kernel.py", "solution.json", "CLAUDE.md", "README.md",
                               f"memory/v{n}.json")
             if (self.workspace / path).exists()
         ]
+        staged += list(candidate_sources)
         staged += [
             str(path.relative_to(self.workspace))
             for path in sorted(self.workspace.glob(f"plans/v{n}_*.md"))
         ]
-        subprocess.run(["git", "add", *staged], cwd=str(self.workspace), check=False,
+        # A coding session may have staged scratch files itself.  Rebuild the index from
+        # the explicit baseline allowlist so the orchestrator never commits undeclared or
+        # path-traversing material along with an accepted multi-source kernel.
+        subprocess.run(
+            ["git", "reset", "--quiet", "HEAD", "--", "."],
+            cwd=str(self.workspace),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        staged = list(dict.fromkeys(staged))
+        subprocess.run(["git", "add", "--", *staged], cwd=str(self.workspace), check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(self.workspace),
                           check=False).returncode != 0:
@@ -858,13 +905,27 @@ class Campaign:
                  f"v{n}: framework baseline ({self.framework}) replacing the V0 PyTorch wrapper"],
                 cwd=str(self.workspace), check=True, stdout=subprocess.DEVNULL,
             )
-        kernel_commit = subprocess.run(
-            ["git", "rev-list", "-1", "HEAD", "--", "kernel.py"],
+        canonical_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
             cwd=str(self.workspace), capture_output=True, text=True, check=True,
         ).stdout.strip()
-        if git_kernel_blob(self.workspace) != git_worktree_blob(self.workspace, "kernel.py"):
+        if (
+            git_path_blob(self.workspace, canonical_commit, "kernel.py")
+            != git_worktree_blob(self.workspace, "kernel.py")
+        ):
             raise RuntimeError(
                 "framework baseline kernel.py differs between the worktree and the commit"
+            )
+        uncommitted_sources = [
+            path
+            for path in candidate_sources
+            if git_path_blob(self.workspace, canonical_commit, path)
+            != git_worktree_blob(self.workspace, path)
+        ]
+        if uncommitted_sources:
+            raise RuntimeError(
+                "framework baseline auxiliary sources differ between the worktree and the commit: "
+                + ", ".join(uncommitted_sources)
             )
 
         _record_local_test_result(self.workspace, f"v{n}", result)
@@ -875,14 +936,14 @@ class Campaign:
         optimization["action_description"] = (
             f"first self-contained {self.framework} implementation of the whole operator"
         )
-        memory["git_commit_hash"] = kernel_commit
+        memory["git_commit_hash"] = canonical_commit
         memory[FRAMEWORK_BASELINE_CATEGORY] = {
             "framework": self.framework,
             "validated_stages": ["single-seed", "multi-seed-5"],
         }
         memory_path.write_text(json.dumps(memory, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        self._pin_framework_baseline(kernel_commit, version=n)
-        return kernel_commit
+        self._pin_framework_baseline(canonical_commit, version=n)
+        return canonical_commit
 
     def _pin_framework_baseline(self, commit: str, *, version: int) -> None:
         """Write and commit the framework-baseline marker.

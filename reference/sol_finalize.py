@@ -43,7 +43,7 @@ import math
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def _sol_execbench_cmd() -> list[str]:
@@ -60,16 +60,82 @@ def _geomean(xs: list[float]) -> float:
     return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else 0.0
 
 
+def _validated_source_path(workspace: Path, source: object, index: int) -> tuple[str, Path]:
+    """Return one safe source path from either supported solution schema form."""
+    if isinstance(source, str):
+        source_text = source
+    elif isinstance(source, dict) and isinstance(source.get("path"), str):
+        source_text = source["path"]
+    else:
+        raise SystemExit(
+            f"[sol_finalize] solution.json sources[{index}] must be a path string "
+            "or path object"
+        )
+    if (
+        not source_text
+        or source_text != source_text.strip()
+        or "\\" in source_text
+        or "\x00" in source_text
+    ):
+        raise SystemExit(
+            f"[sol_finalize] solution.json sources[{index}] is not a canonical relative path"
+        )
+    relative = PurePosixPath(source_text)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or relative.as_posix() != source_text
+        or not relative.parts
+        or relative.parts[0] == ".git"
+    ):
+        raise SystemExit(
+            f"[sol_finalize] solution.json sources[{index}] escapes or targets metadata: "
+            f"{source_text!r}"
+        )
+    root = workspace.resolve()
+    candidate = root.joinpath(*relative.parts)
+    if not candidate.is_file():
+        raise SystemExit(
+            f"[sol_finalize] solution.json sources[{index}] does not name an existing file: "
+            f"{source_text!r}"
+        )
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(
+            f"[sol_finalize] solution.json sources[{index}] escapes the workspace: "
+            f"{source_text!r}"
+        ) from exc
+    if resolved != candidate:
+        raise SystemExit(
+            f"[sol_finalize] solution.json sources[{index}] uses symlink indirection: "
+            f"{source_text!r}"
+        )
+    return relative.as_posix(), candidate
+
+
 def build_submission(workspace: Path) -> dict:
     """Self-contained solution.json with every source's content inlined from disk."""
-    sol = json.loads((workspace / "solution.json").read_text(encoding="utf-8"))
-    for src in sol.get("sources", []):
-        p = workspace / src["path"]
-        if not p.is_file():
-            raise SystemExit(f"[sol_finalize] source not found on disk: {p}")
-        src["content"] = p.read_text(encoding="utf-8")
-    if not sol.get("sources"):
+    try:
+        sol = json.loads((workspace / "solution.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"[sol_finalize] invalid solution.json: {exc}") from exc
+    if not isinstance(sol, dict):
+        raise SystemExit("[sol_finalize] solution.json must contain an object")
+    sources = sol.get("sources")
+    if not isinstance(sources, list):
+        raise SystemExit("[sol_finalize] solution.json sources must be a list")
+    if not sources:
         raise SystemExit("[sol_finalize] solution.json has no sources")
+    inlined_sources: list[dict] = []
+    for index, source in enumerate(sources):
+        source_path, candidate = _validated_source_path(workspace, source, index)
+        normalized = dict(source) if isinstance(source, dict) else {"path": source_path}
+        normalized["path"] = source_path
+        normalized["content"] = candidate.read_text(encoding="utf-8")
+        inlined_sources.append(normalized)
+    sol["sources"] = inlined_sources
     return sol
 
 

@@ -23,7 +23,7 @@ same-allocation ABBA verification, and squash promotion; it is not a second CLI.
   evidence.
 - **Reproducible state**: Git HEAD is the incumbent kernel; structured memory and artifacts
   preserve the reasoning and measurements behind each attempt.
-- **Execution isolation**: GPU work crosses `tools/sandbox.py`; campaign memory, plans, edits,
+- **Execution isolation**: accelerator work crosses `tools/sandbox.py`; campaign memory, plans, edits,
   and Git state remain local.
 - **Evaluator integrity**: immutable ground truth and full-workload validation prevent harness
   edits or partial-shape wins from becoming accepted results.
@@ -58,7 +58,7 @@ same-allocation ABBA verification, and squash promotion; it is not a second CLI.
 │   ├── sandbox.py                     # Gateway packaging and execution boundary
 │   ├── local_gateway.py               # Trusted localhost FIFO scheduler
 │   ├── memory_manager.py              # Structured iteration memory manager
-│   └── profile_*.sh / analysis tools  # NVIDIA and AMD profiling helpers
+│   └── profile_*.sh / analysis tools  # NVIDIA, AMD, and Ascend profiling helpers
 ├── reference/                         # Workspace init, evaluator adapters, schema, SOL packaging
 ├── gpu-wiki/                          # Hardware and optimization knowledge base
 ├── reference-projects/                # Optional source-search repositories
@@ -75,11 +75,11 @@ points.
 | --- | --- | --- |
 | Campaign control | `orchestrator/campaign.py` | Workspace Git history and canonical memory |
 | Episode exploration | `long_horizon/` plus one coding-agent session | Journal, handoff, archived attempt and telemetry |
-| GPU execution | `tools/sandbox.py` plus gateway | Structured evaluator result and requested profile artifacts |
+| Accelerator execution | `tools/sandbox.py` plus gateway | Structured evaluator result and requested profile artifacts |
 | Optimization knowledge | `gpu-wiki/`, then optional `reference-projects/` | Evidence references recorded by the episode |
 
 The Agent may edit only its isolated candidate worktree. It cannot decide promotion, mutate the
-incumbent directly, replace evaluator inputs, or use local host GPU execution. Conversely, the
+incumbent directly, replace evaluator inputs, or use local host accelerator execution. Conversely, the
 supervisor does not generate optimization code: it validates, measures, records, and promotes
 exact committed sources.
 
@@ -88,8 +88,8 @@ exact committed sources.
 ```bash
 python orchestrator/optimize.py \
   --op-dir /path/to/operator \
-  --platform TARGET_GPU \
-  --sandbox-hardware REMOTE_GPU \
+  --platform TARGET_ACCELERATOR \
+  --sandbox-hardware REMOTE_ACCELERATOR \
   --framework Triton
 ```
 
@@ -102,7 +102,11 @@ The main workspace name is deterministic. Leaderboard mode uses
 `kernel_opt_<op>_<framework>_<platform>`; production mode appends `_production` so a strict
 production campaign cannot silently resume permissive leaderboard history. Omitting `--framework`
 launches one child process and one independent workspace for every framework supported by the
-runtime-detected GPU vendor.
+runtime-detected accelerator vendor. Ascend 910B1 dispatches AscendC; use `--arch ascend910b1`
+when the gateway runtime cannot be probed or reports only an ambiguous family name.
+This is backend routing, not evaluator readiness: current upstream native Atrex-Bench remains
+CPU/CUDA-oriented and SOL-ExecBench is not an Ascend evaluator. A runnable Ascend campaign requires
+an NPU/`torch_npu`-ready evaluator/operator with AscendC multi-source support.
 
 ## Core Components
 
@@ -138,7 +142,7 @@ control. Adapters expose a common request/result model containing:
 - backend capability and observation-error metadata.
 
 The process supervisor also protects the host execution boundary by rejecting dependency builds,
-direct host GPU execution, profiler use outside the sandbox, and mutations of a shared localhost
+direct host accelerator execution, profiler use outside the sandbox, and mutations of a shared localhost
 gateway.
 
 ### Workspace runtime assets
@@ -205,9 +209,13 @@ provided by `orchestrator/optimize.py`.
 ### 1. Resolve the operator and runtime
 
 `--op-dir` supplies all operator-specific ground truth. The orchestrator detects SOL or native
-Atrex-Bench format, probes the runtime GPU architecture, resolves the framework set, initializes
+Atrex-Bench format, probes the runtime accelerator architecture, resolves the framework set, initializes
 required submodules, and creates a framework/hardware-suffixed workspace below `--workspace` or
 the current directory.
+
+The detected Ascend route can select AscendC and `msprof`, but it cannot convert either recognized
+upstream evaluator layout into an NPU evaluator. Ascend proceeds end to end only when the supplied
+operator/evaluator already implements NPU device placement, synchronization, and source handling.
 
 ### 2. Establish V0
 
@@ -270,6 +278,9 @@ from main-workspace commits; their recoverable local state remains on disk.
 
 - NVIDIA profiling uses `tools/profile_nvidia.sh` and Nsight Compute.
 - AMD profiling uses `tools/profile_kernel.sh`, rocprofv3, ATT, PMC, and assembly extraction.
+- Ascend profiling routing uses `tools/profile_ascend.sh` and CANN `msprof op` when an NPU-ready
+  driver is supplied; raw CANN artifacts are retained, while unavailable version-specific structured
+  fields stay explicitly unavailable.
 - `tools/memory_manager.py` creates, reads, updates, masks, and summarizes iteration records.
 - Episodes attribute wall time and token usage to profile, research, planning, implementation,
   correctness, benchmark, and recording phases when the backend emits complete markers and usage

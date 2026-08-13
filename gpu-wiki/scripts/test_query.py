@@ -40,6 +40,10 @@ class QueryTests(unittest.TestCase):
                 "# MI300X Hardware Specifications\n",
             "amd/cdna3/mi308x/hardware-specs/hardware_specs_mi308x.md":
                 "# MI308X Hardware Specifications\n",
+            "ascend/ascend910b/ref-docs/ascendc/programming-model.md":
+                "# AscendC Programming Model for Ascend 910B\n",
+            "ascend/ascend910b/ascend910b1/hardware-specs/hardware_specs_ascend910b1.md":
+                "# Ascend 910B1 Hardware Specifications\n",
             "nvidia/blackwell/b200/hardware-specs/hardware_specs_b200.md":
                 "# B200 Hardware Specifications\n",
             "nvidia/blackwell-ultra/hardware-specs/hardware_specs_b300.md":
@@ -128,6 +132,11 @@ class QueryTests(unittest.TestCase):
         self.assertIn("vendor=amd", mi355x)
         self.assertNotIn("docs/nvidia/", mi355x)
 
+        _, ascend910b1 = self.run_query("--arch", "910b1")
+        self.assertIn("vendor=ascend", ascend910b1)
+        self.assertNotIn("docs/nvidia/", ascend910b1)
+        self.assertNotIn("docs/amd/", ascend910b1)
+
     def test_sm120_only_legacy_pitfalls_do_not_leak_to_hopper(self):
         pages = {
             "nvidia/blackwell-geforce/pitfalls/cutedsl/gdn-decode-pitfalls.md":
@@ -161,6 +170,11 @@ class QueryTests(unittest.TestCase):
         self.assertIn("hardware_specs_b300.md", b300)
         self.assertNotIn("hardware_specs_b200.md", b300)
 
+        _, ascend910b1 = self.run_query(
+            "--arch", "ascend910b1", "--section", "hardware-specs"
+        )
+        self.assertIn("hardware_specs_ascend910b1.md", ascend910b1)
+
     def test_blackwell_family_and_sm100_exact_queries_are_distinct(self):
         _, family = self.run_query("--arch", "blackwell", "--section", "hardware-specs")
         self.assertIn("hardware_specs_b200.md", family)
@@ -176,6 +190,12 @@ class QueryTests(unittest.TestCase):
         _, output = self.run_query("--arch", "gfx942", "--section", "hardware-specs")
         self.assertIn("hardware_specs_mi300x.md", output)
         self.assertIn("hardware_specs_mi308x.md", output)
+
+    def test_ascend910b1_inherits_family_docs_and_accepts_ascendc_dsl(self):
+        _, output = self.run_query("--arch", "910b1", "--dsl", "ascendc")
+        self.assertIn("ascend910b/ref-docs/ascendc/programming-model.md", output)
+        self.assertNotIn("docs/nvidia/", output)
+        self.assertNotIn("docs/amd/", output)
 
     def test_amd_product_specific_pitfalls_do_not_leak_to_sibling_products(self):
         pages = {
@@ -636,7 +656,7 @@ class ArchitectureFirstLayoutTests(unittest.TestCase):
 
     def test_every_searchable_document_has_architecture_first_scope_and_role(self):
         self.assertEqual(
-            {"amd", "generic", "nvidia"},
+            {"amd", "ascend", "generic", "nvidia"},
             {path.name for path in self.docs.iterdir() if path.is_dir()},
         )
         content_files = {
@@ -646,9 +666,9 @@ class ArchitectureFirstLayoutTests(unittest.TestCase):
         }
         pages = query.load_pages(self.docs)
         self.assertEqual(content_files, {page.rel_path for page in pages})
-        self.assertEqual(344, len(pages))
+        self.assertEqual(348, len(pages))
         for page in pages:
-            self.assertIn(page.segments[0], {"amd", "generic", "nvidia"})
+            self.assertIn(page.segments[0], {"amd", "ascend", "generic", "nvidia"})
             self.assertIsNotNone(query.section_value(page), page.rel_path)
 
     def test_top_level_manifest_supplies_live_docs_scope(self):
@@ -661,6 +681,8 @@ class ArchitectureFirstLayoutTests(unittest.TestCase):
                 self.assertEqual(frozenset({"nvidia"}), page.vendors, page.rel_path)
             elif page.rel_path.startswith("amd/"):
                 self.assertEqual(frozenset({"amd"}), page.vendors, page.rel_path)
+            elif page.rel_path.startswith("ascend/"):
+                self.assertEqual(frozenset({"ascend"}), page.vendors, page.rel_path)
 
     def test_live_hardware_aliases_route_to_exact_physical_scope(self):
         expected = {
@@ -673,6 +695,10 @@ class ArchitectureFirstLayoutTests(unittest.TestCase):
             "mi300x": "amd/cdna3/mi300x/hardware-specs/hardware_specs_mi300x.md",
             "mi308x": "amd/cdna3/mi308x/hardware-specs/hardware_specs_mi308x.md",
             "mi355x": "amd/cdna4/hardware-specs/hardware_specs_mi355x.md",
+            "910b1": (
+                "ascend/ascend910b/ascend910b1/hardware-specs/"
+                "hardware_specs_ascend910b1.md"
+            ),
         }
         for alias, path in expected.items():
             output = io.StringIO()
@@ -691,6 +717,7 @@ class ArchitectureFirstLayoutTests(unittest.TestCase):
         pro5000 = self.scoped_paths("blackwell-geforce", "nvidia")
         mi300x = self.scoped_paths("mi300x", "amd")
         mi308x = self.scoped_paths("mi308x", "amd")
+        ascend910b1 = self.scoped_paths("ascend910b1", "ascend")
 
         self.assertTrue(any(path.startswith("nvidia/blackwell/kernel-opt/") for path in b200))
         self.assertTrue(any(path.startswith("nvidia/blackwell/b200/") for path in b200))
@@ -699,6 +726,8 @@ class ArchitectureFirstLayoutTests(unittest.TestCase):
         self.assertFalse(any(path.startswith("nvidia/blackwell/") for path in pro5000))
         self.assertFalse(any("/mi308x/" in path for path in mi300x))
         self.assertFalse(any("/mi300x/" in path for path in mi308x))
+        self.assertTrue(any(path.startswith("ascend/ascend910b/ref-docs/") for path in ascend910b1))
+        self.assertTrue(any("/ascend910b1/" in path for path in ascend910b1))
 
 
 class Pro5000KnowledgeTests(unittest.TestCase):
@@ -738,6 +767,32 @@ class Pro5000KnowledgeTests(unittest.TestCase):
 
 
 class HardwareKnowledgeTests(unittest.TestCase):
+    def test_ascend910b1_versioned_peak_table_is_path_specific(self):
+        hardware = (
+            REPO_ROOT
+            / "gpu-wiki/docs/ascend/ascend910b/ascend910b1/hardware-specs/"
+            "hardware_specs_ascend910b1.md"
+        )
+        text = hardware.read_text(encoding="utf-8")
+
+        self.assertIn("**363.7248 TFLOP/s**", text)
+        self.assertIn("**727.4496 TOPS**", text)
+        self.assertIn("**1454.8992 TOPS if one MMAD issues per cycle**", text)
+        self.assertIn("**11.3664 tera-add/s**", text)
+        self.assertIn("**5.6832 tera-add/s if one repeat issues per cycle**", text)
+        self.assertIn("AIC FP32 Cube | **unknown**", text)
+        self.assertIn("AIC HF32 Cube | **unknown**", text)
+        self.assertIn("AIV FMA / transcendental | **not asserted**", text)
+        self.assertIn("MIX kernel | **no scalar aggregate**", text)
+        self.assertIn("estimates **386.4576 TFLOP/s**", text)
+        self.assertIn("it is not the\nCube peak used here", text)
+        self.assertIn("Roofline model | **1.8 TB/s**", text)
+        self.assertIn("Roofline model | **8.0 TB/s**", text)
+        self.assertIn("**1.26710 TB/s median**", text)
+        self.assertIn("physical HBM-interface rating | **unknown**", text)
+        self.assertNotIn("**1.4208 TB/s**", text)
+        self.assertNotIn("376 TFLOP", text)
+
     def test_b200_shared_memory_matches_official_tuning_guide(self):
         path = REPO_ROOT / "gpu-wiki/docs/nvidia/blackwell/b200/hardware-specs/hardware_specs_b200.md"
         text = path.read_text(encoding="utf-8")

@@ -28,6 +28,17 @@ branch are allowed. Never edit evaluator or ground-truth files, including `test_
 `metadata.json`, `roofline.json`, `CLAUDE.md`, or `README.md`. Do not write canonical `memory/vN.json`;
 the supervisor creates it after terminal validation.
 
+For an AscendC episode (`vendor=ascend`, `arch=ascend910b1`, `framework=AscendC`), the candidate may
+consist of the evaluator-facing `kernel.py` plus self-authored `.cpp`, `.h`, and `.asc` files. Every such
+file must be listed in `solution.json.sources`; undeclared files, prebuilt custom operators, and external
+implementations are outside candidate ownership.
+
+An AscendC candidate using CANN's CMake/Bisheng fast-launch route must also declare `CMakeLists.txt` in
+`solution.json.sources`. Candidate Python may run only direct, checked, literal-argv CMake commands:
+`subprocess.run(["cmake", ...], check=True)`. Never execute `bash`/`sh`, enable `shell=True`, build a
+command string, source a setup script, or execute a non-`cmake` subprocess. The gateway already supplies
+the CANN environment. Keep all compilation and candidate imports behind `tools/sandbox.py`.
+
 {{MODE_POLICY}}
 
 {{EVALUATOR}}
@@ -43,10 +54,26 @@ the supervisor creates it after terminal validation.
   `python tools/sandbox.py ... --`.
 - Never start, stop, restart, signal, replace, or mutate the shared gateway service, its screen
   session, state directory, database, log, or jobs. Report infrastructure failure instead.
-- Never install or build dependencies with pip, uv, conda, setup.py, ninja, cmake, or package-manager
-  commands. Use only the immutable campaign environment.
-- Static source inspection is allowed. Imports or probes that may initialize CUDA/ROCm/JIT code must
+- Never install dependencies with pip, uv, conda, setup.py, or package-manager commands. Use only the
+  immutable campaign environment. AscendC may use the preinstalled CANN compiler/CMake/ninja path through
+  the sandbox only to build declared, self-authored candidate sources; building third-party code is forbidden.
+- Static source inspection is allowed. Imports or probes that may initialize CUDA/ROCm/NPU/JIT code must
   run through the sandbox.
+- Never use a host `import torch_npu` merely to locate its package. Static discovery, when unavoidable,
+  is `python -c "import importlib.util; print(importlib.util.find_spec('torch_npu').submodule_search_locations)"`;
+  runtime candidate code may inspect `torch_npu.__file__` inside the gateway.
+
+On Ascend, claim profiler evidence only when the sandbox exposes a working `msprof` path and the command
+produces inspectable output for the committed candidate. If that integration is unavailable, record the
+profiling gap explicitly and continue only with honestly labeled static, compile, correctness, and benchmark
+evidence; never invent `msprof` metrics or translate NCU/rocprof fields into Ascend results.
+
+For AscendC research, keep L1 architecture-scoped with `--arch ascend910b1 --vendor ascend --dsl ascendc`;
+do not drop those filters to manufacture a hit. If L1 is insufficient, search L2 in strict order:
+`reference-projects/ops-nn` -> `reference-projects/vllm-ascend` -> `reference-projects/cann-ops`.
+Repositories carrying the Ascend Open Source Software License Agreement (OSLA) are reference-only:
+derive API/design patterns, but do not copy code verbatim, load their implementation, or make them a
+candidate dependency.
 
 ## Framework escalation state
 
@@ -64,6 +91,10 @@ When conversion is mandatory, treat the whole episode as a Triton-to-Gluon lower
    defects inside this episode rather than handing off the first translation attempt.
 4. A terminal candidate must be committed Gluon, correctness-passing in development, and plausibly
    within 5% of the incumbent. The supervisor independently enforces parity.
+
+This Triton-to-Gluon conversion table is GPU-backend-specific. It does not create a conversion path for
+an AscendC/Ascend 910B1 campaign: keep AscendC and use its CANN toolchain unless the authoritative
+`{{CONVERSION_DIRECTIVE}}` explicitly selects another supported framework.
 
 ## Prior episode evidence
 

@@ -107,6 +107,21 @@
         ]
       },
       {
+        "prefix": "ascend/ascend910b/",
+        "architectures": [
+          "ascend910b"
+        ],
+        "vendors": [
+          "ascend"
+        ]
+      },
+      {
+        "prefix": "ascend/ascend910b/ascend910b1/",
+        "architectures": [
+          "ascend910b1"
+        ]
+      },
+      {
         "prefix": "generic/",
         "architectures": [],
         "vendors": []

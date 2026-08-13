@@ -10,9 +10,11 @@ AKA exposes one supported execution path: the unattended, budget-bounded orchest
 - Python 3, `torch`, and `jq` on the coordinator host
 - One coding runtime available on `PATH`: `claude`, `qodercli`, `codex`, or `pi`
 - `agate` (`atrex-gateway-client`) configured with gateway URL and credentials
-- The selected gateway environment must provide the workload's framework and GPU stack
+- The selected gateway environment must provide the workload's framework and accelerator stack
 - NVIDIA workers: `ncu`, wrapped by `tools/profile_nvidia.sh`
 - AMD workers: `rocprofv3`, wrapped by `tools/profile_kernel.sh`
+- Ascend 910B1 workers: CANN 8.5, `torch_npu`, `npu-smi`, and `msprof`, wrapped by
+  `tools/profile_ascend.sh`
 
 The orchestrator verifies required submodules and `jq` before starting. Missing required submodules
 are initialized automatically; the large `reference-projects/` collection remains optional.
@@ -24,6 +26,21 @@ git clone https://github.com/alibaba/atrex-kernel-agent.git
 cd atrex-kernel-agent
 ```
 
+For AscendC generation, initialize the pinned CANN 8.5 reference corpus explicitly; the orchestrator
+does not download optional reference projects automatically:
+
+```bash
+git submodule update --init --depth 1 \
+  reference-projects/ops-nn \
+  reference-projects/vllm-ascend \
+  reference-projects/cann-ops
+```
+
+Search these references in the same order: `ops-nn`, then `vllm-ascend`, then the historical
+`cann-ops`. Do not use `git submodule update --remote`, because the repository gitlinks pin versions
+chosen for CANN 8.5. See [`reference-projects/README.md`](../reference-projects/README.md) for exact
+pins and license/provenance constraints.
+
 `--op-dir` supports two evaluator-owned layouts:
 
 - SOL-ExecBench: `reference.py`, `definition.json`, and `workload.jsonl`.
@@ -32,6 +49,13 @@ cd atrex-kernel-agent
   `valid.py` are copied when present.
 
 The orchestrator never treats operator inputs as editable candidate files.
+
+> **Ascend evaluator readiness:** recognizing either layout does not make it NPU-ready. At the
+> current upstream revisions, native Atrex-Bench device/synchronization/profiler hooks are
+> CPU/CUDA-oriented (ROCm uses the CUDA-compatible PyTorch namespace), and SOL-ExecBench is not an
+> Ascend evaluator. This repository now provides Ascend detection, AscendC routing/policy, multi-source
+> packaging, and `msprof` transport, but a complete Ascend campaign still requires an `--op-dir` whose
+> evaluator and operator already support NPU/`torch_npu` and AscendC sources.
 
 ## 2. Run the Orchestrated Loop
 
@@ -45,11 +69,44 @@ python orchestrator/optimize.py \
     --max-iters 20 --token-budget 8000000 --target-util 90
 ```
 
+Only with such an NPU-ready evaluator/operator, use AscendC and pass the canonical architecture
+explicitly when the runtime `torch_npu` probe is unavailable, the gateway inventory is aliased, or
+`npu-smi` reports only a family-level name:
+
+```bash
+python orchestrator/optimize.py \
+    --op-dir /path/to/npu-ready/operator \
+    --platform Ascend910B1 --sandbox-hardware REMOTE_ASCEND \
+    --framework AscendC --arch ascend910b1 \
+    --agent-cli qodercli \
+    --max-iters 20 --token-budget 8000000 --target-util 90
+```
+
+`--arch` overrides runtime detection; it does not select a physical device. Exact aliases such as
+`Ascend910B1` normalize to `ascend910b1`, while a family-only `910B` remains `ascend910b`. If the
+target is known to be B1, using the exact canonical form keeps campaign state and gpu-wiki retrieval
+unambiguous.
+
+Before attempting that campaign, this read-only probe prints the worker's exact SoC, installed CANN
+platform configuration, compiler paths, and Python packages. Confirm that it reports `Ascend910B1`
+rather than assuming every `910B` label is the B1 variant:
+
+```bash
+python tools/sandbox.py --hardware REMOTE_ASCEND --no-sync -- \
+  python tools/ascend_capability.py
+```
+
+The exact B1 compute ceilings, confidence levels, msProf Roofline ceilings, and practical-copy
+measurement are indexed in [the Ascend 910B1 peak table](../gpu-wiki/docs/ascend/ascend910b/ascend910b1/hardware-specs/hardware_specs_ascend910b1.md).
+Re-measure the same-size practical bandwidth ceiling inside the evaluator environment with
+`tools/bench_ascend_bandwidth.py`; do not derive a card bandwidth by multiplying undocumented
+`AICoreMemoryRates` fields.
+
 The orchestrator initializes its required submodules on first run, creates a flat
 leaderboard workspace named `kernel_opt_<name>_<framework>_<platform>/` under `--workspace` or
 the current directory, and runs each canonical version as an isolated Long Horizon episode. One
 episode may contain many related profile/edit/validate cycles; its candidate is promoted only after
-independent same-allocation ABBA verification. GPU evaluations and profiles run through
+independent same-allocation ABBA verification. Accelerator evaluations and profiles run through
 `tools/sandbox.py` on `--sandbox-hardware`; `memory/`, episode journals, worktrees, and Git stay
 local. It finalizes a directly submittable SOL-ExecBench output after a passing run. `--platform` is
 required and names the logical optimization target.
@@ -115,7 +172,7 @@ leaving provider credentials in Pi's normal auth/config files. `ATREX_PI_SESSION
 
 ### Multi-framework campaigns
 
-Omit `--framework` to run every framework supported by the detected GPU concurrently:
+Omit `--framework` to run every framework supported by the detected accelerator concurrently:
 
 ```bash
 python orchestrator/optimize.py \
@@ -125,8 +182,10 @@ python orchestrator/optimize.py \
 ```
 
 The runtime architecture is authoritative for vendor selection. NVIDIA dispatches Triton, CuteDSL, and
-Cuda; AMD dispatches Triton and FlyDSL; unknown hardware dispatches Triton. Leaderboard workspaces use
-flat names such as `/path/to/runs/kernel_opt_<name>_triton_h20`; production workspaces append
+Cuda; AMD dispatches Triton and FlyDSL; Ascend dispatches AscendC; unknown hardware dispatches Triton.
+If automatic detection cannot see the worker runtime, pass `--arch ascend910b1` explicitly for a 910B1
+campaign. Leaderboard workspaces use flat names such as
+`/path/to/runs/kernel_opt_<name>_triton_h20`; production workspaces append
 `_production`. `--max-iters` and `--token-budget` apply independently to each framework campaign.
 Passing `--framework` selects one campaign but keeps the same mode-specific naming convention.
 Every campaign optimizes the complete workload set in one version line.
@@ -147,8 +206,8 @@ python orchestrator/optimize.py \
 
 Production mode may omit `--framework`; like leaderboard mode, it auto-dispatches all frameworks supported
 by the detected hardware. Every child receives one explicit framework constraint. V0 remains a PyTorch
-correctness baseline, while every accepted optimization commit must implement the GPU computation exclusively
-in that child's framework. Non-standard imports, declared dependencies, and library references are
+correctness baseline, while every accepted optimization commit must implement the accelerator computation
+exclusively in that child's framework. Non-standard imports, declared dependencies, and library references are
 reviewed by a separate read-only policy Agent: build/ABI/launch plumbing for a self-authored kernel may
 be accepted, while prebuilt compute, alternate frameworks, hidden dispatch, and external implementation
 loading are rejected. The orchestrator writes the policy into the workspace, injects it into every episode,
@@ -178,10 +237,10 @@ performance parity pass, and later episodes remain in Gluon.
 --iter-timeout S                 Wall-clock budget and worst-case handoff cadence for one episode
                                  (default: 5400)
 --setup-timeout S                V0 setup session timeout (default: 7200)
---sandbox-hardware GPU           Gateway selector or alias
+--sandbox-hardware ACCELERATOR   Gateway selector or alias
 --sandbox-profile PROFILE        Optional pre/prod endpoint profile
 --sandbox-url URL                Explicit endpoint URL
---sandbox-timeout S              Remote command timeout, at most 600 seconds
+--sandbox-timeout S              Remote command timeout, at most 1800 seconds
 --workspace DIR                  Campaign parent directory (default: current directory)
 --max-stall N                    Stop after N unpromoted episodes (0 = disabled)
 --convert-after N                Triton stalls before mandatory Gluon conversion (default: 3)
@@ -202,7 +261,7 @@ that tradeoff and refreshes within an active episode.
 
 ### Local gateway
 
-To use the same gateway interface on a local GPU, start the bundled community scheduler. It has no
+To use the same gateway interface on a local accelerator, start the bundled community scheduler. It has no
 third-party Python dependencies:
 
 ```bash
@@ -212,15 +271,17 @@ python tools/local_gateway.py serve \
 ```
 
 The default single worker executes jobs FIFO, so concurrent optimizer requests queue instead of contending
-for the GPU. `agate dev`, `agate get/jobs/cancel`, long polling, environment discovery, and
+for the accelerator. `agate dev`, `agate get/jobs/cancel`, long polling, environment discovery, and
 `tools/sandbox.py` use the same HTTP shapes as atrex-gateway. See [local_gateway.md](local_gateway.md) for
 the exact compatibility surface.
 
 This is interface compatibility, not process isolation: submitted code runs directly as the server user.
 Bind it to localhost and submit trusted code only. The worker inherits the server process's Python/toolchain
-environment, so install `torch`, Triton, and any kernel DSL needed by the workload into that environment.
+environment. For AscendC, source the CANN 8.5 `set_env.sh` before starting the gateway and use an
+environment containing matching `torch`/`torch_npu`; for NVIDIA/AMD, provide `torch`, Triton, and any
+kernel DSL needed by the workload.
 
-Then select the localhost endpoint and the server's `local` GPU alias:
+Then select the localhost endpoint and the server's `local` accelerator alias:
 
 ```bash
 python orchestrator/optimize.py \
@@ -244,12 +305,26 @@ The gateway transport can also be used directly for validation and profiling:
 ```bash
 python tools/sandbox.py --hardware REMOTE_GPU --no-sync -- python test_kernel.py --no-memory
 python tools/sandbox.py --hardware REMOTE_GPU --sync profiles/v1 -- \
-  bash tools/profile_nvidia.sh kernel.py --output-dir profiles/v1 --source
+  bash tools/profile_nvidia.sh profile_driver.py --output-dir profiles/v1 --source
+
+# Ascend 910B1 / CANN 8.5
+python tools/sandbox.py --hardware REMOTE_ASCEND --kind profile --profiler msprof \
+  --include-raw-profile \
+  --sync profiles/v1 -- \
+  bash tools/profile_ascend.sh profile_driver.py --output-dir profiles/v1
 
 # Same interface through the bundled local gateway
 python tools/sandbox.py --hardware local --url http://127.0.0.1:8000 \
   --no-sync -- python test_kernel.py --no-memory
 ```
+
+The Ascend command assumes `profile_driver.py` already performs NPU placement and synchronization;
+the wrapper does not adapt a CUDA-only evaluator. It runs `msprof op`, retains raw CANN artifacts
+under `profiles/v1/msprof/`, and
+reports structured metrics as unavailable until a version-specific parser is implemented. Do not
+invent metrics from filenames or map NCU/rocprof counter names onto Ascend output. If `msprof` is not
+available after sourcing CANN, the wrapper fails explicitly instead of silently selecting another
+profiler.
 
 The gateway receives code and evaluator/profile inputs only. Optimization memory, plans, edits, and
 Git state remain on the coordinator.

@@ -7,6 +7,7 @@ import subprocess
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import main_adapter
 from .git_episode import _git
@@ -16,6 +17,52 @@ from .store import VERIFY_DIR
 
 
 ABBA_RESULT_PREFIX = "__ATREX_LONG_HORIZON_ABBA_RESULT__="
+COLD_BUILD_GRACE_SECONDS = 240
+RUN_TEARDOWN_GRACE_SECONDS = 60
+VERIFIER_TEARDOWN_GRACE_SECONDS = 30
+MAX_LOCAL_ALLOCATION_TIMEOUT = 1800
+
+
+def _is_loopback_url(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        hostname = urlsplit(value).hostname
+    except ValueError:
+        return False
+    return hostname in {"127.0.0.1", "::1", "localhost"}
+
+
+def _uses_cmake_candidate(workspace: Path) -> bool:
+    solution_path = workspace / "solution.json"
+    try:
+        solution = json.loads(solution_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    sources = solution.get("sources") if isinstance(solution, dict) else None
+    if not isinstance(sources, list):
+        return False
+    paths = {
+        entry if isinstance(entry, str) else entry.get("path")
+        for entry in sources
+        if isinstance(entry, (str, dict))
+    }
+    return "CMakeLists.txt" in paths
+
+
+def _required_allocation_timeout(
+    schedule_size: int,
+    per_run_timeout: int,
+    cold_start_grace: int,
+) -> int:
+    # Every timed evaluator gets both the remote driver's fixed teardown grace
+    # and the CANN compiler-discovery allowance. AscendC can repeat that
+    # discovery in each evaluator process even with a warm CMake directory.
+    return (
+        schedule_size
+        * (per_run_timeout + RUN_TEARDOWN_GRACE_SECONDS + cold_start_grace)
+        + VERIFIER_TEARDOWN_GRACE_SECONDS
+    )
 
 
 def _payload_from_stdout(stdout: str) -> dict[str, Any]:
@@ -183,10 +230,21 @@ class GatewayABBAValidator:
         changed_paths: list[str],
     ) -> VerificationResult:
         schedule = verification_schedule(self.repeats)
-        if self.per_run_timeout * len(schedule) + 30 > self.timeout:
+        cold_start_grace = COLD_BUILD_GRACE_SECONDS if _uses_cmake_candidate(workspace) else 0
+        required_timeout = _required_allocation_timeout(
+            len(schedule), self.per_run_timeout, cold_start_grace
+        )
+        allocation_timeout = self.timeout
+        if required_timeout > allocation_timeout and _is_loopback_url(self.url):
+            allocation_timeout = min(required_timeout, MAX_LOCAL_ALLOCATION_TIMEOUT)
+        if required_timeout > allocation_timeout:
             return VerificationResult(
                 "ERROR", None, None, None,
-                error="ABBA schedule cannot fit in one gateway allocation timeout",
+                error=(
+                    "ABBA schedule cannot fit in one gateway allocation timeout: "
+                    f"requires {required_timeout}s including cold-build allowance, "
+                    f"gateway budget is {allocation_timeout}s"
+                ),
             )
         verification_id = uuid.uuid4().hex
         relative_dir = f"{VERIFY_DIR}/{verification_id}"
@@ -213,6 +271,7 @@ class GatewayABBAValidator:
             "manifests": manifests,
             "command": ["python3", "test_kernel.py", "--version", "vlong", "--no-memory"],
             "run_timeout_seconds": self.per_run_timeout,
+            "cold_start_grace_seconds": cold_start_grace,
         }
         atomic_write_json(workspace / request_relative, request)
         try:
@@ -221,7 +280,7 @@ class GatewayABBAValidator:
                 self.hardware,
                 self.profile,
                 self.url,
-                self.timeout,
+                allocation_timeout,
                 [
                     "python3",
                     f"{relative_dir}/test_kernel.py",
@@ -232,7 +291,7 @@ class GatewayABBAValidator:
                 # sentinel.  No artifact is synchronized, avoiding the
                 # gateway's elided-payload/base64 transport failure.
                 sync=(),
-                wall_timeout=self.timeout + self.queue_wait_grace + 120,
+                wall_timeout=allocation_timeout + self.queue_wait_grace + 120,
                 gateway_kind="dev",
             )
         except subprocess.TimeoutExpired:

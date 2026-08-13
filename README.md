@@ -18,6 +18,10 @@ not a second CLI.
 ## Current Design
 
 - Accepts SOL-ExecBench operators and native Atrex-Bench shape operators.
+- Provides experimental Ascend 910B1/AscendC detection, policy, multi-source packaging, and
+  `msprof` transport, plus a versioned AIC/AIV peak-evidence provider. A complete Ascend campaign
+  still requires an NPU-ready operator evaluator;
+  the current upstream SOL/Atrex-Bench evaluators are not made NPU-capable by this repository.
 - Creates one isolated Git workspace per framework and target, with separate campaign state for
   leaderboard and production optimization.
 - Establishes a correctness-passing V0 and, by default in production mode, a self-contained
@@ -123,6 +127,9 @@ Reference kernel projects (`reference-projects/`):
 - [aiter](https://github.com/ROCm/aiter) — ROCm AIter
 - [quack](https://github.com/Dao-AILab/quack) — Dao-AILab Quack
 - [tilelang](https://github.com/tile-ai/tilelang) — TileLang
+- [ops-nn](https://gitcode.com/cann/ops-nn) — release-aligned CANN neural-network operators and AscendC examples
+- [vllm-ascend](https://github.com/vllm-project/vllm-ascend) — vLLM integration and LLM custom operators for Ascend
+- [cann-ops](https://gitee.com/ascend/cann-ops) — historical CANN operator implementation patterns
 
 Knowledge base and tooling (`gpu-wiki/3rdparty/`, `3rdparty/`):
 

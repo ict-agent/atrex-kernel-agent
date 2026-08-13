@@ -15,7 +15,9 @@ Use this skill when the user provides PyTorch logic or a kernel demo and asks to
 
 ## Workflow
 
-This stage first understands the PyTorch semantics, then learns the framework APIs (CuteDSL or FlyDSL) through `<gpu-wiki>/README.md`, implements `kernel.py` and `test_kernel.py`, validates correctness, records performance, writes `baseline_report.md`, and writes `memory/v0.json`.
+This stage first understands the PyTorch semantics, then learns the target framework APIs (CuteDSL,
+FlyDSL, or AscendC) through `<gpu-wiki>/README.md`, implements the candidate and `test_kernel.py`,
+validates correctness, records performance, writes `baseline_report.md`, and writes `memory/v0.json`.
 
 The orchestrator exposes the knowledge base at `./gpu-wiki/` inside each campaign workspace,
 referenced below as `<gpu-wiki>/`.
@@ -32,6 +34,7 @@ referenced below as `<gpu-wiki>/`.
    - H100/H20/H200 -> Hopper -> `CuteDSL`
    - MI300X/MI308X -> CDNA3 -> `FlyDSL`
    - MI355X -> CDNA4 -> `FlyDSL`
+   - Ascend 910B1 -> `ascend910b1` -> `AscendC`
 4. If the PyTorch logic is ambiguous, first create a minimal runnable reference, then continue.
 
 ## Phase 2: Learn Framework APIs from gpu-wiki
@@ -40,14 +43,44 @@ referenced below as `<gpu-wiki>/`.
 2. Prioritize API docs, reference kernels, hardware constraints, and pitfalls directly related to the target platform, framework, and compute pattern.
 3. Prefer implementations with the same framework and compute pattern.
 4. Enter relevant documents through each directory-level `README.md`; do not blindly grep the full wiki first.
-5. Record learned wiki paths, API constraints, hardware constraints, and pitfalls in `plans/v0_plan.md` for implementation and reporting.
+5. Query L1 with the real architecture, vendor, and DSL. For Ascend 910B1, use the Ascend scope
+   explicitly rather than a CUDA/ROCm substitute:
+
+   ```bash
+   python3 gpu-wiki/scripts/query.py --arch ascend910b1 --vendor ascend \
+     --area docs --dsl ascendc --operator <operator> \
+     --section ref-docs --section pitfalls
+   python3 gpu-wiki/scripts/query.py <operator-or-mechanism> --arch ascend910b1 \
+     --vendor ascend --dsl ascendc --area reference-kernels --kind kernel
+   ```
+
+6. If L1 does not yield an actionable AscendC pattern, search L2 under `reference-projects/` in this
+   order: `ops-nn` -> `vllm-ascend` -> `cann-ops`. Repositories carrying the Ascend Open Source
+   Software License Agreement (OSLA) are **reference-only**: learn API usage and organization, but do
+   not copy code verbatim, load their implementations, or declare them as candidate dependencies.
+7. Record learned wiki paths, reference-project paths, API constraints, hardware constraints, and
+   pitfalls in `plans/v0_plan.md` for implementation and reporting.
 
 ## Phase 3: Implement Baseline Kernel and Correctness Tests
 
-1. Implement a correct baseline `kernel.py` based on PyTorch semantics and the learned framework APIs.Not only must the functionality be correct, but the framework implementation must also be correct, using either CuteDSL or FlyDSL.
-2. Write `test_kernel.py` using PyTorch logic directly as the correctness reference.
-3. Cover representative inputs, including normal shapes, boundary shapes, and relevant dtype or stride cases.
-4. Example correctness check:
+1. Implement a correct baseline based on PyTorch semantics and the learned framework APIs. For CuteDSL
+   and FlyDSL the executable candidate remains in `kernel.py`. For AscendC, keep the evaluator-facing
+   Python entry point in `kernel.py` and place only self-authored kernel/tiling/host glue in `.cpp`, `.h`,
+   or `.asc` files listed by relative path in `solution.json.sources`.
+2. Update `solution.json` languages and dependencies for the selected framework. An AscendC candidate's
+   `sources` list must include `kernel.py` and every source/header needed to compile and launch it; do not
+   rely on undeclared side files, prebuilt custom operators, or imported reference implementations.
+   Compile those declared self-authored sources only through the sandbox with the preinstalled CANN
+   toolchain. Do not install dependencies or build any reference-project/third-party source.
+   When using the CANN CMake/Bisheng fast-launch route, also declare `CMakeLists.txt`. Candidate Python
+   may invoke only direct checked literal-argv CMake commands such as
+   `subprocess.run(["cmake", "-S", ...], check=True)`; shell commands, `shell=True`, command strings,
+   setup-script sourcing, and non-CMake subprocess executables are forbidden. The gateway already has
+   the CANN environment. Never import `torch_npu` in a host probe; use `importlib.util.find_spec` for
+   static location discovery or perform the probe through `tools/sandbox.py`.
+3. Write `test_kernel.py` using PyTorch logic directly as the correctness reference.
+4. Cover representative inputs, including normal shapes, boundary shapes, and relevant dtype or stride cases.
+5. Example correctness check:
 
 ```python
 ref = pytorch_reference(inputs)
@@ -56,8 +89,8 @@ rel_err = (out.float() - ref).norm() / ref.norm()
 assert rel_err < 0.01
 ```
 
-5. The default BF16 threshold is `rel_err < 0.01`; lower precision formats may use task-specific relaxed thresholds.
-6. Add per-case timeout guard in `test_kernel.py` to prevent hanging:
+6. The default BF16 threshold is `rel_err < 0.01`; lower precision formats may use task-specific relaxed thresholds.
+7. Add per-case timeout guard in `test_kernel.py` to prevent hanging:
 
 ```python
 import signal
@@ -78,15 +111,15 @@ for case in test_cases:
     finally:
         signal.alarm(0)
 ```
-6. If API, compilation, accuracy, performance, or hardware issues appear, return to `<gpu-wiki>/` through README indexes, read the relevant docs/reference kernels/pitfalls, and then fix the implementation.
-7. Record the baseline configuration, including tile size, thread organization, grid/block design, and major data-movement patterns.
+8. If API, compilation, accuracy, performance, or hardware issues appear, return to `<gpu-wiki>/` through README indexes, read the relevant docs/reference kernels/pitfalls, and then fix the implementation.
+9. Record the baseline configuration, including tile size, core/block organization, and major data-movement patterns.
 
 ## Phase 4: Performance, Correctness, and Quality Gate
 
 1. Run `test_kernel.py` with a per-case timeout to prevent hanging on compilation errors or infinite loops:
 
 ```bash
-timeout 60 python test_kernel.py   # default 60s per run; adjust via --timeout flag
+timeout 60 python tools/sandbox.py --kind run --no-sync -- python test_kernel.py
 ```
 
    - Each individual test case must complete within **30 seconds** (configurable via `TEST_TIMEOUT_SEC` env var).
@@ -106,7 +139,17 @@ latency(us) | TFLOPS | bandwidth(GB/s) | TFLOPS peak utilization(%) | bandwidth 
 python tools/compute_utilization.py   --gpu <gpu> --dtype <dtype>   --flops-expr '<expr>' --bytes-expr '<expr>'   --time-ms <ms> --grid-blocks <blocks>
 ```
 
+For `ascend910b1`, also pass `--execution-kind aic|aiv|mix`; AIV requires
+`--operation-kind add|fma`. The provider rejects unsupported scalar MIX/FMA
+peaks. Use `--allow-modeled-peak` only when its recorded assumptions match the
+kernel. Select `--bandwidth-kind hbm_cycle_model` for the CANN msProf Roofline
+model or `measured_copy_256m` for the recorded practical copy ceiling.
+
 5. Every theoretical peak, bandwidth, and utilization calculation must cite the gpu-wiki spec sources registered in Step 0.
+   On Ascend, do not claim hardware-counter or bottleneck evidence unless the sandbox has a working
+   `msprof` integration and produced inspectable output for this candidate. If it is not connected,
+   state that profiling is unavailable and report only measured evaluator timing; never fabricate
+   `msprof` fields or reinterpret NCU/rocprof counters as Ascend metrics.
 6. Write `baseline_report.md` with:
    - Baseline kernel path
    - Correctness test path
@@ -142,9 +185,12 @@ python tools/compute_utilization.py   --gpu <gpu> --dtype <dtype>   --flops-expr
 8. After the quality gate passes, commit:
 
 ```bash
-git add kernel.py test_kernel.py baseline_report.md memory/v0.json README.md
+git add kernel.py solution.json test_kernel.py baseline_report.md memory/v0.json README.md
+# AscendC only: explicitly stage every additional solution.json.sources[].path here.
 git commit -m "V0: baseline kernel"
 ```
+Before the commit, an AscendC campaign must also run `git add --` with the actual additional source
+paths and verify that every `solution.json.sources[].path` appears in the staged file list.
 
 ## memory/ Requirements
 
@@ -156,7 +202,7 @@ Key rules:
 
 ## Deliverables
 
-- Runnable and correct(using either CuteDSL or FlyDSL) `kernel.py`
+- Runnable and correct candidate using CuteDSL, FlyDSL, or AscendC (`kernel.py` plus any declared AscendC sources)
 - PyTorch `reference.py`
 - `test_kernel.py`
 - `baseline_report.md`
@@ -166,3 +212,5 @@ Key rules:
 ## Appendix: Prohibited Actions
 
 - Do not use unspecified programming frameworks or import external projects.
+- Do not reduce an AscendC campaign to CUDA/ROCm assumptions; use `vendor=ascend`,
+  `arch=ascend910b1`, and `framework=AscendC` throughout discovery and implementation.

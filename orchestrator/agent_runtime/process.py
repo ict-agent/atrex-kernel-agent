@@ -253,8 +253,19 @@ def dependency_process_violation(argv: list[str]) -> str | None:
         )
         if executable in {"nvcc", "cicc", "ptxas", "fatbinary", "ninja"} and not info_only:
             return "CUDA/JIT build tool executed directly on the host"
-        if executable in {"ncu", "rocprof", "rocprofv3", "compute-sanitizer"}:
-            return "GPU profiler executed directly on the host"
+        if executable in {"ccec", "bisheng", "ascendc_pack_kernel"} and not info_only:
+            return "AscendC/JIT build tool executed directly on the host"
+        if executable in {
+            "ncu",
+            "rocprof",
+            "rocprofv3",
+            "compute-sanitizer",
+            "msprof",
+            "mskpp",
+        }:
+            return "accelerator profiler executed directly on the host"
+        if executable == "npu-smi" and not info_only:
+            return "Ascend device probe executed directly on the host"
         if re.fullmatch(r"python[0-9.]*", executable):
             if len(tokens) > 1 and Path(tokens[1]).name == "sandbox.py":
                 return None
@@ -270,13 +281,17 @@ def dependency_process_violation(argv: list[str]) -> str | None:
                 imports = python_import_roots(code)
                 if "kernel" in imports:
                     return "kernel imported directly on the host"
-                if imports & {"flashinfer", "flash_attn", "xformers", "vllm"}:
-                    return "JIT-capable third-party GPU package imported directly on the host"
+                if imports & {"flashinfer", "flash_attn", "xformers", "vllm", "torch_npu"}:
+                    return "JIT-capable accelerator package imported directly on the host"
         if executable in {"bash", "sh", "dash", "zsh", "ksh"} and any(
-            Path(token).name in {"profile_nvidia.sh", "profile_kernel.sh"}
+            Path(token).name in {
+                "profile_nvidia.sh",
+                "profile_kernel.sh",
+                "profile_ascend.sh",
+            }
             for token in tokens[1:]
         ):
-            return "GPU profiler wrapper executed directly on the host"
+            return "accelerator profiler wrapper executed directly on the host"
         return None
 
     for segment in segments:
@@ -299,6 +314,9 @@ def dependency_process_violation(argv: list[str]) -> str | None:
         "g++",
         "clang",
         "clang++",
+        "ccec",
+        "bisheng",
+        "ascendc_pack_kernel",
     }
     if package_build_tree and any(
         unwrap(segment) and Path(unwrap(segment)[0]).name.lower() in build_tools

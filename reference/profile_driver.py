@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """External profiling driver for a kernel-opt workspace.
 
-Both profiler wrappers (`tools/profile_nvidia.sh`, `tools/profile_kernel.sh`) run
-`python <file>`, so the profiled file must be runnable on its own. `kernel.py` is not:
-the evaluator only ever *imports* it. This driver is that runnable entry point, kept
-outside `kernel.py` so no rewrite of `run()`/`Model` can silently remove the ability
-to profile.
+The NVIDIA, AMD, and Ascend profiler wrappers run `python <file>`, so the profiled
+file must be runnable on its own. `kernel.py` is not: the evaluator only ever
+*imports* it. This driver is that runnable entry point, kept outside `kernel.py` so
+no rewrite of `run()`/`Model` can silently remove the ability to profile.
 
 It builds real inputs from the campaign's immutable ground-truth files, warms up, and
 then invokes the candidate repeatedly so the profiler captures steady-state launches.
@@ -29,7 +28,7 @@ Environment:
     PROFILE_WARMUP        warmup iterations (default 3)
     PROFILE_WORKLOAD_IDX  SOL workload index (default 0)
     PROFILE_SHAPE_ID      Atrex-Bench shape id (default: first sorted key)
-    PROFILE_DEVICE        torch device (default cuda:0)
+    PROFILE_DEVICE        torch device (default cuda:0; use npu:0 for Ascend)
 """
 
 from __future__ import annotations
@@ -106,7 +105,7 @@ def _run_sol(root: Path, device: str) -> None:
     outputs = allocate_outputs(
         definition, definition.get_resolved_axes_values(workload.axes), device
     )
-    _drive(lambda: run(*inputs, *outputs), f"SOL workload[{index}]")
+    _drive(lambda: run(*inputs, *outputs), f"SOL workload[{index}]", device)
 
 
 def _run_atrex_bench(root: Path, device: str) -> None:
@@ -147,23 +146,40 @@ def _run_atrex_bench(root: Path, device: str) -> None:
         for key, value in raw.items()
     }
     with torch.no_grad():
-        _drive(lambda: model(**inputs), f"Atrex-Bench shape[{shape_id}]")
+        _drive(lambda: model(**inputs), f"Atrex-Bench shape[{shape_id}]", device)
 
 
-def _drive(call, label: str) -> None:
-    """Warm up, then invoke the candidate PROFILE_ITERS times with a sync at each end."""
+def _synchronize(device: str) -> None:
+    """Synchronize the selected torch accelerator without assuming a CUDA API."""
     import torch
 
-    # ROCm's torch exposes the same cuda API, so this covers both vendors. A host without an
-    # accelerator cannot be profiled anyway; skipping the sync keeps the driver importable there.
-    def sync() -> None:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+    device_type = str(device).split(":", 1)[0].lower()
+    if device_type == "npu":
+        try:
+            import torch_npu
+        except ImportError:
+            torch_npu = None
+        npu = getattr(torch, "npu", None)
+        if npu is None and torch_npu is not None:
+            npu = getattr(torch_npu, "npu", None)
+        if npu is None or not callable(getattr(npu, "synchronize", None)):
+            raise RuntimeError(
+                "PROFILE_DEVICE selects an NPU, but torch.npu/torch_npu.npu "
+                "does not provide synchronize()"
+            )
+        npu.synchronize()
+        return
+    # ROCm's torch exposes the CUDA compatibility API too.
+    if device_type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
 
+
+def _drive(call, label: str, device: str) -> None:
+    """Warm up, then invoke the candidate PROFILE_ITERS times with a sync at each end."""
     warmup, iters = _iterations()
     for _ in range(warmup):
         call()
-    sync()
+    _synchronize(device)
     print(
         f"[profile_driver] {label}: warmup={warmup} iters={iters}",
         file=sys.stderr,
@@ -171,7 +187,7 @@ def _drive(call, label: str) -> None:
     )
     for _ in range(iters):
         call()
-    sync()
+    _synchronize(device)
 
 
 def main() -> int:

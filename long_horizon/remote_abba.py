@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -51,6 +52,42 @@ def _apply_revision(root: Path, snapshot_root: Path, manifest: dict[str, object]
         shutil.copy2(source, target)
 
 
+def _materialize_revision_roots(
+    root: Path,
+    snapshot_root: Path,
+    manifests: dict[str, object],
+    destination: Path,
+) -> dict[str, Path]:
+    """Create stable, isolated trees for the incumbent and candidate.
+
+    Mutating one build tree back and forth is unsafe for CMake candidates:
+    snapshot mtimes do not necessarily increase when ABBA returns to the
+    incumbent, so an incremental build can silently reuse the candidate's
+    binary. Separate trees prevent revision cross-contamination even when the
+    evaluator or CANN toolchain performs process-local compiler discovery on
+    every sample.
+    """
+    revision_roots: dict[str, Path] = {}
+    for revision in ("incumbent", "candidate"):
+        manifest = manifests.get(revision)
+        if not isinstance(manifest, dict):
+            raise ValueError(f"missing {revision} snapshot manifest")
+        revision_root = destination / revision
+        shutil.copytree(
+            root,
+            revision_root,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                "verification_artifacts",
+                "build_ascendc",
+                "__pycache__",
+            ),
+        )
+        _apply_revision(revision_root, snapshot_root, manifest)
+        revision_roots[revision] = revision_root
+    return revision_roots
+
+
 def _parse_result(stdout: str) -> dict[str, Any] | None:
     for line in reversed(stdout.splitlines()):
         if line.startswith(RESULT_PREFIX):
@@ -72,56 +109,65 @@ def run(request_path: Path, result_path: Path) -> int:
         # allowance for first-run compiler/cache startup and process teardown;
         # otherwise large shape buckets can time out only on the cold A/B
         # passes while the identical warm passes succeed moments later.
-        timeout = int(request.get("run_timeout_seconds", 120)) + RUN_TIMEOUT_GRACE_SECONDS
+        run_timeout = int(request.get("run_timeout_seconds", 120))
+        # Older coordinators do not include this field.  Default to the
+        # measured-safe AscendC cold-build allowance so upgrading the worker
+        # side fixes an already-running campaign as well as new submissions.
+        cold_start_grace = int(request.get("cold_start_grace_seconds", 240))
         if not isinstance(schedule, list) or not schedule:
             raise ValueError("ABBA schedule must be a non-empty list")
         if not isinstance(manifests, dict):
             raise ValueError("ABBA manifests must be an object")
         if not isinstance(command, list) or not command or any(not isinstance(x, str) for x in command):
             raise ValueError("ABBA command must be a list of strings")
-        if timeout <= 0:
+        if run_timeout <= 0 or cold_start_grace < 0:
             raise ValueError("run timeout must be positive")
         root = Path.cwd()
         snapshot_root = request_path.parent
-        for step in schedule:
-            if not isinstance(step, dict):
-                raise ValueError("ABBA schedule entries must be objects")
-            revision = step.get("revision")
-            repeat = step.get("repeat")
-            if revision not in {"incumbent", "candidate"} or not isinstance(repeat, int):
-                raise ValueError("invalid ABBA schedule entry")
-            manifest = manifests.get(revision)
-            if not isinstance(manifest, dict):
-                raise ValueError(f"missing {revision} snapshot manifest")
-            _apply_revision(root, snapshot_root, manifest)
-            try:
-                process = subprocess.run(
-                    command,
-                    cwd=str(root),
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    env=os.environ.copy(),
-                )
-                result = _parse_result(process.stdout)
-                row = {
-                    "revision": revision,
-                    "repeat": repeat,
-                    "exit_code": process.returncode,
-                    "result": result,
-                    "stdout_tail": process.stdout[-3000:],
-                    "stderr_tail": process.stderr[-3000:],
-                }
-            except subprocess.TimeoutExpired as exc:
-                row = {
-                    "revision": revision,
-                    "repeat": repeat,
-                    "exit_code": -1,
-                    "result": None,
-                    "stdout_tail": str(exc.stdout or "")[-3000:],
-                    "stderr_tail": "evaluation timed out",
-                }
-            runs.append(row)
+        with tempfile.TemporaryDirectory(prefix="atrex-abba-") as temporary:
+            revision_roots = _materialize_revision_roots(
+                root, snapshot_root, manifests, Path(temporary)
+            )
+            for step in schedule:
+                if not isinstance(step, dict):
+                    raise ValueError("ABBA schedule entries must be objects")
+                revision = step.get("revision")
+                repeat = step.get("repeat")
+                if revision not in {"incumbent", "candidate"} or not isinstance(repeat, int):
+                    raise ValueError("invalid ABBA schedule entry")
+                # AscendC's compiler-discovery phase can run again in every
+                # evaluator process even when the CMake build directory is
+                # warm. Give every ABBA sample the declared build allowance;
+                # the outer allocation budget accounts for the same bound.
+                timeout = run_timeout + RUN_TIMEOUT_GRACE_SECONDS + cold_start_grace
+                try:
+                    process = subprocess.run(
+                        command,
+                        cwd=str(revision_roots[revision]),
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        env=os.environ.copy(),
+                    )
+                    result = _parse_result(process.stdout)
+                    row = {
+                        "revision": revision,
+                        "repeat": repeat,
+                        "exit_code": process.returncode,
+                        "result": result,
+                        "stdout_tail": process.stdout[-3000:],
+                        "stderr_tail": process.stderr[-3000:],
+                    }
+                except subprocess.TimeoutExpired as exc:
+                    row = {
+                        "revision": revision,
+                        "repeat": repeat,
+                        "exit_code": -1,
+                        "result": None,
+                        "stdout_tail": str(exc.stdout or "")[-3000:],
+                        "stderr_tail": "evaluation timed out",
+                    }
+                runs.append(row)
         payload = {"schema_version": 1, "runs": runs, "error": None}
     except Exception as exc:
         payload = {

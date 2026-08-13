@@ -7,6 +7,9 @@ one GPU family or product from silently entering another GPU's search scope.
 ```text
 docs/
 ├── generic/                         # vendor-independent knowledge
+├── ascend/
+│   └── ascend910b/                  # Atlas A2 / 910B family
+│       └── ascend910b1/             # exact 910B1 product overlay
 ├── nvidia/
 │   ├── common/                      # vendor-general / explicit cross-arch
 │   ├── ampere/                      # SM80 / A100
@@ -39,6 +42,7 @@ and `nvidia/blackwell/b200/`, whereas B300 excludes B200-only evidence.
 ## Entry points
 
 - [Generic knowledge](generic/)
+- [Ascend knowledge](ascend/)
 - [NVIDIA knowledge](nvidia/)
 - [AMD knowledge](amd/)
 - [Cross-architecture relationships](RELATIONS.md)
@@ -50,6 +54,7 @@ known:
 python3 gpu-wiki/scripts/query.py --arch h20 --area docs --section hardware-specs
 python3 gpu-wiki/scripts/query.py "gdn" --arch pro5000 --dsl cutedsl
 python3 gpu-wiki/scripts/query.py "flash attention" --arch mi308x --dsl flydsl
+python3 gpu-wiki/scripts/query.py --arch 910b1 --vendor ascend --dsl ascendc
 ```
 
 `--area docs` excludes reference implementations. Omit `--area` to search

@@ -132,12 +132,17 @@ python3 gpu-wiki/scripts/query.py --arch b200 \
   --area docs --section kernel-opt --symptom pipeline-stalls
 python3 gpu-wiki/scripts/query.py gemm --arch b300 \
   --area reference-kernels --source cutlass --kind kernel
+python3 gpu-wiki/scripts/query.py --arch ascend910b1 \
+  --vendor ascend --dsl ascendc --area docs --section hardware-specs
 python3 gpu-wiki/scripts/query.py rms_nrom --arch h20 --fuzzy
 ```
 
 Only `--arch` is needed to establish hardware isolation, and it implies its
 vendor when `--vendor` is omitted. A keyword search covers docs, indexed
 reference sources, and manifest-selected substantive guides by default.
+For Ascend 910B1 generation, prefer the explicit canonical scope
+`--arch ascend910b1 --vendor ascend --dsl ascendc`; do not remove `--arch`
+when an alias is unknown or a query returns no hits.
 `--area`, `--section`, `--symptom`, `--kernel-type`, `--operator`, `--dsl`,
 `--source`, `--status`, and `--kind` are optional narrowing filters. Unknown
 filter values fail closed; test/build/package references are excluded unless

@@ -1,0 +1,8 @@
+{
+  "name": "torch_add_4096",
+  "operator": "torch.add",
+  "dtype": "float16",
+  "length": 4096,
+  "target": "Ascend910B1",
+  "execution_kind": "aiv"
+}

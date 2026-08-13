@@ -30,6 +30,8 @@ Examples::
         bash tools/profile_nvidia.sh profile_driver.py --output-dir profiles/v1 --source
     python tools/sandbox.py --kind profile --hardware REMOTE_ACCELERATOR --gateway-profile pre --sync profiles/v1 -- \
         bash tools/profile_kernel.sh profile_driver.py --output-dir profiles/v1
+    python tools/sandbox.py --kind profile --hardware ASCEND_910B --sync profiles/v1 -- \
+        bash tools/profile_ascend.sh profile_driver.py --output-dir profiles/v1
 
 ``ATREX_SANDBOX_GPU``, ``ATREX_SANDBOX_PROFILE``, ``ATREX_SANDBOX_URL``, and
 ``ATREX_SANDBOX_TIMEOUT`` provide defaults for the corresponding flags.  A
@@ -62,6 +64,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -119,7 +122,12 @@ INPUT_SKIP_SUFFIXES = {
 OUTPUT_BEGIN = "__ATREX_SANDBOX_OUTPUT_BEGIN__"
 OUTPUT_END = "__ATREX_SANDBOX_OUTPUT_END__"
 DEFAULT_COMMAND_TIMEOUT = 600
-MAX_COMMAND_TIMEOUT = 600
+# Long-horizon verification may need two cold compiler starts before the
+# alternating timed runs can begin.  AscendC/Bisheng cold builds regularly take
+# several minutes, so the localhost gateway supports a larger explicit budget
+# while ordinary sandbox calls retain the 600 second default.
+MAX_COMMAND_TIMEOUT = 1800
+LEGACY_LOCAL_ABBA_TIMEOUT = 1710
 DEFAULT_QUEUE_WAIT_GRACE = 14_400
 MAX_HTTP_REQUEST_TIMEOUT = 600
 RUNTIME_CHUNK_BYTES = 20 * 1024
@@ -159,6 +167,7 @@ NVIDIA_PROFILE_TOOL_INPUT_PATHS = frozenset(
     }
 )
 AMD_PROFILE_TOOL_INPUT_PATHS = frozenset({"tools/profile_kernel.sh"})
+ASCEND_PROFILE_TOOL_INPUT_PATHS = frozenset({"tools/profile_ascend.sh"})
 OUTPUT_PATH_FLAGS = frozenset({"-o", "--output", "--output-dir"})
 TEST_RESULT_PREFIX = "[test_kernel] RESULT_JSON="
 PROFILE_RESULT_PREFIX = "[sandbox] PROFILE_JSON="
@@ -255,28 +264,83 @@ def _make_input_bundle(
     return base64.b64encode(archive.getvalue()).decode("ascii"), count, skipped
 
 
+def _solution_source_paths(workspace: Path, solution: Any) -> tuple[str, ...]:
+    """Validate and normalize string/``{path: ...}`` solution source entries."""
+    if not isinstance(solution, dict):
+        raise ValueError("workspace solution.json must contain an object")
+    sources = solution.get("sources", [])
+    if not isinstance(sources, list):
+        raise ValueError("workspace solution.json sources must be a list")
+    if not sources:
+        raise ValueError("workspace solution.json sources must be a non-empty list")
+
+    root = workspace.resolve()
+    selected: list[str] = []
+    for index, source in enumerate(sources):
+        if isinstance(source, str):
+            source_text = source
+        elif isinstance(source, dict) and isinstance(source.get("path"), str):
+            source_text = source["path"]
+        else:
+            raise ValueError(
+                f"workspace solution.json sources[{index}] must be a path string or path object"
+            )
+        if (
+            not source_text
+            or source_text != source_text.strip()
+            or "\\" in source_text
+            or "\x00" in source_text
+        ):
+            raise ValueError(
+                f"workspace solution.json sources[{index}] is not a canonical relative path"
+            )
+        relative = PurePosixPath(source_text)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != source_text
+            or not relative.parts
+            or relative.parts[0] == ".git"
+        ):
+            raise ValueError(
+                f"workspace solution.json sources[{index}] escapes or targets metadata: "
+                f"{source_text!r}"
+            )
+        candidate = root.joinpath(*relative.parts)
+        if not candidate.is_file():
+            raise ValueError(
+                f"workspace solution.json sources[{index}] does not name an existing file: "
+                f"{source_text!r}"
+            )
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"workspace solution.json sources[{index}] escapes the workspace: "
+                f"{source_text!r}"
+            ) from exc
+        if resolved != candidate:
+            raise ValueError(
+                f"workspace solution.json sources[{index}] uses symlink indirection: "
+                f"{source_text!r}"
+            )
+        canonical = relative.as_posix()
+        if canonical not in selected:
+            selected.append(canonical)
+    return tuple(selected)
+
+
 def _declared_candidate_sources(workspace: Path) -> set[str]:
-    """Return candidate sources declared by solution.json plus verification artifacts."""
+    """Return validated candidate sources plus verification artifacts."""
     selected: set[str] = set()
     solution_path = workspace / "solution.json"
     if solution_path.is_file():
         try:
             solution = json.loads(solution_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"invalid workspace solution.json: {exc}") from exc
-        sources = solution.get("sources", []) if isinstance(solution, dict) else []
-        if not isinstance(sources, list):
-            raise RuntimeError("workspace solution.json sources must be a list of paths")
-        for source in sources:
-            if isinstance(source, str):
-                source_path = source
-            elif isinstance(source, dict) and isinstance(source.get("path"), str):
-                source_path = source["path"]
-            else:
-                raise RuntimeError(
-                    "workspace solution.json source entries must be paths or path objects"
-                )
-            selected.add(_safe_relative(source_path))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid workspace solution.json: {exc}") from exc
+        selected.update(_solution_source_paths(workspace, solution))
 
     verification_sources = workspace / "verification_artifacts"
     if verification_sources.is_dir():
@@ -392,6 +456,7 @@ def _command_input_paths(
             "profile_driver.py",
             "profile_nvidia.sh",
             "profile_kernel.sh",
+            "profile_ascend.sh",
             "extract_ttgir.py",
         }
         or any("harness" in PurePosixPath(path).parts for path in selected)
@@ -409,6 +474,8 @@ def _command_input_paths(
             )
     if "profile_kernel.sh" in basenames:
         selected.update(AMD_PROFILE_TOOL_INPUT_PATHS)
+    if "profile_ascend.sh" in basenames:
+        selected.update(ASCEND_PROFILE_TOOL_INPUT_PATHS)
 
     # Profile drivers can have sibling helper modules imported by name. Upload
     # that small harness directory, never the complete profiles tree.
@@ -435,9 +502,22 @@ def _is_test_kernel_command(parts: list[str]) -> bool:
 def _is_profile_command(parts: list[str]) -> bool:
     """Return whether argv invokes one of the repository profiler wrappers."""
     return any(
-        Path(token).name in {"profile_nvidia.sh", "profile_kernel.sh"}
+        Path(token).name in {"profile_nvidia.sh", "profile_kernel.sh", "profile_ascend.sh"}
         for token in _command_parts(parts)
     )
+
+
+def _profile_command_profiler(parts: list[str]) -> str | None:
+    """Infer the typed backend from a repository profiler wrapper name."""
+    names = {Path(token).name for token in _command_parts(parts)}
+    for wrapper, profiler in (
+        ("profile_ascend.sh", "msprof"),
+        ("profile_nvidia.sh", "ncu"),
+        ("profile_kernel.sh", "rocprofv3"),
+    ):
+        if wrapper in names:
+            return profiler
+    return None
 
 
 def _option_value(parts: list[str], name: str, default: Any = None) -> Any:
@@ -476,15 +556,9 @@ def _typed_workspace_limitation(workspace: Path, command: list[str]) -> str | No
 
     solution = _json_object(workspace / "solution.json")
     if solution is not None:
-        sources = solution.get("sources")
-        if isinstance(sources, list):
-            source_paths = {
-                str(item.get("path"))
-                for item in sources
-                if isinstance(item, dict) and item.get("path")
-            }
-            if source_paths - {"kernel.py"}:
-                return "solution.json declares auxiliary candidate sources"
+        source_paths = set(_solution_source_paths(workspace, solution))
+        if source_paths - {"kernel.py"}:
+            return "solution.json declares auxiliary candidate sources"
 
     try:
         tree = ast.parse((workspace / "kernel.py").read_text(encoding="utf-8"))
@@ -856,7 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.environ.get("ATREX_SANDBOX_TIMEOUT", str(DEFAULT_COMMAND_TIMEOUT))),
         help=(
-            "Remote command execution timeout in seconds, 1..600 "
+            f"Remote command execution timeout in seconds, 1..{MAX_COMMAND_TIMEOUT} "
             "(default: 600; queue wait is budgeted separately)."
         ),
     )
@@ -874,7 +948,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Typed profile funnel level (default: sol).",
     )
     parser.add_argument(
-        "--profiler", choices=("ncu", "rocprofv3"), default=None,
+        "--profiler", choices=("ncu", "rocprofv3", "msprof"), default=None,
         help="Typed profile backend (default: gateway vendor auto-detection).",
     )
     parser.add_argument(
@@ -1229,8 +1303,8 @@ def _typed_agate_command(
         command += ["--env-var", item]
     if kind == "profile":
         command += ["--level", args.profile_level]
-        if args.profiler:
-            command += ["--profiler", args.profiler]
+        if request.get("profiler"):
+            command += ["--profiler", str(request["profiler"])]
         for counter in args.profile_counter:
             command += ["--counter", counter]
         if args.kernel_regex:
@@ -1421,7 +1495,7 @@ def _run_typed_gateway(
             args.env,
             command_parts,
             kind,
-            profiler=args.profiler,
+            profiler=args.profiler or _profile_command_profiler(command_parts),
             profile_level=args.profile_level,
             counters=args.profile_counter,
             kernel_regex=args.kernel_regex,
@@ -1536,6 +1610,26 @@ def _main(argv: list[str] | None = None) -> int:
             "sandbox: --timeout must be in the gateway-supported range "
             f"1..{MAX_COMMAND_TIMEOUT}"
         )
+    # A coordinator started before the cold-build-aware verifier was deployed
+    # still submits its ABBA dev job with the historical 600 second timeout.
+    # The sandbox process itself is fresh for every request, so upgrade that
+    # one known localhost command in place.  New coordinators already pass the
+    # calculated allocation timeout and do not need this compatibility path.
+    try:
+        loopback = urlsplit(args.url).hostname in {"127.0.0.1", "::1", "localhost"}
+    except ValueError:
+        loopback = False
+    legacy_abba = any(
+        ".atrex_long_horizon_verify" in str(value)
+        for value in _command_parts(args.command)
+    )
+    if loopback and legacy_abba and args.timeout < LEGACY_LOCAL_ABBA_TIMEOUT:
+        print(
+            "[sandbox] extending localhost ABBA allocation from "
+            f"{args.timeout}s to {LEGACY_LOCAL_ABBA_TIMEOUT}s for AscendC builds",
+            file=sys.stderr,
+        )
+        args.timeout = LEGACY_LOCAL_ABBA_TIMEOUT
     try:
         queue_wait_grace = int(
             os.environ.get("ATREX_SANDBOX_QUEUE_WAIT_GRACE", str(DEFAULT_QUEUE_WAIT_GRACE))
@@ -1595,17 +1689,17 @@ def _main(argv: list[str] | None = None) -> int:
         gateway_kind = "dev"
 
     evaluator_command = _is_test_kernel_command(args.command)
-    if evaluator_command:
-        selected_inputs = _evaluation_input_paths(workspace)
-    else:
-        try:
+    try:
+        if evaluator_command:
+            selected_inputs = _evaluation_input_paths(workspace)
+        else:
             selected_inputs = _command_input_paths(
                 workspace,
                 args.command,
                 args.input,
             )
-        except ValueError as exc:
-            raise SystemExit(f"sandbox: {exc}") from exc
+    except ValueError as exc:
+        raise SystemExit(f"sandbox: {exc}") from exc
     bundle, file_count, skipped = _make_input_bundle(
         workspace,
         args.max_input_file_mb * 1024 * 1024,
@@ -1842,7 +1936,7 @@ def _main(argv: list[str] | None = None) -> int:
 
 def _sandbox_telemetry_category(arguments: list[str]) -> str:
     names = {Path(value).name for value in arguments}
-    if names & {"profile_nvidia.sh", "profile_kernel.sh"}:
+    if names & {"profile_nvidia.sh", "profile_kernel.sh", "profile_ascend.sh"}:
         return "profile"
     if "test_kernel.py" in names:
         return "correctness" if "--multi-seed" in arguments else "benchmark"

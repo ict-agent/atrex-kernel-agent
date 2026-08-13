@@ -50,7 +50,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def _sol_execbench_cmd() -> list[str]:
@@ -215,6 +215,61 @@ def _record_memory(workspace: Path, version: str, s: dict) -> Path:
     return path
 
 
+def _validated_source_path(workspace: Path, source: object, index: int) -> tuple[str, Path]:
+    """Return one safe source path from either supported solution schema form."""
+    if isinstance(source, str):
+        source_text = source
+    elif isinstance(source, dict) and isinstance(source.get("path"), str):
+        source_text = source["path"]
+    else:
+        raise SystemExit(
+            f"[test_kernel] solution.json sources[{index}] must be a path string "
+            "or path object"
+        )
+    if (
+        not source_text
+        or source_text != source_text.strip()
+        or "\\" in source_text
+        or "\x00" in source_text
+    ):
+        raise SystemExit(
+            f"[test_kernel] solution.json sources[{index}] is not a canonical relative path"
+        )
+    relative = PurePosixPath(source_text)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or relative.as_posix() != source_text
+        or not relative.parts
+        or relative.parts[0] == ".git"
+    ):
+        raise SystemExit(
+            f"[test_kernel] solution.json sources[{index}] escapes or targets metadata: "
+            f"{source_text!r}"
+        )
+    root = workspace.resolve()
+    candidate = root.joinpath(*relative.parts)
+    if not candidate.is_file():
+        raise SystemExit(
+            f"[test_kernel] solution.json sources[{index}] does not name an existing file: "
+            f"{source_text!r}"
+        )
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(
+            f"[test_kernel] solution.json sources[{index}] escapes the workspace: "
+            f"{source_text!r}"
+        ) from exc
+    if resolved != candidate:
+        raise SystemExit(
+            f"[test_kernel] solution.json sources[{index}] uses symlink indirection: "
+            f"{source_text!r}"
+        )
+    return relative.as_posix(), candidate
+
+
 def _write_submission(workspace: Path) -> "Path | None":
     """Emit the self-contained, directly-submittable SOL solution next to the kernel.
 
@@ -225,11 +280,26 @@ def _write_submission(workspace: Path) -> "Path | None":
     sol_path = workspace / "solution.json"
     if not sol_path.exists():
         return None
-    sol = json.loads(sol_path.read_text(encoding="utf-8"))
-    for src in sol.get("sources", []):
-        p = workspace / src["path"]
-        if p.is_file():
-            src["content"] = p.read_text(encoding="utf-8")
+    try:
+        sol = json.loads(sol_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"[test_kernel] invalid solution.json: {exc}") from exc
+    if not isinstance(sol, dict):
+        raise SystemExit("[test_kernel] solution.json must contain an object")
+    sources = sol.get("sources")
+    if not isinstance(sources, list):
+        raise SystemExit("[test_kernel] solution.json sources must be a list")
+    if not sources:
+        raise SystemExit("[test_kernel] solution.json has no sources")
+
+    inlined_sources: list[dict] = []
+    for index, source in enumerate(sources):
+        source_path, candidate = _validated_source_path(workspace, source, index)
+        normalized = dict(source) if isinstance(source, dict) else {"path": source_path}
+        normalized["path"] = source_path
+        normalized["content"] = candidate.read_text(encoding="utf-8")
+        inlined_sources.append(normalized)
+    sol["sources"] = inlined_sources
     out = workspace / "submission.json"
     out.write_text(json.dumps(sol, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return out

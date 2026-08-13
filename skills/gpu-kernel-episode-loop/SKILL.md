@@ -72,6 +72,13 @@ python tools/sandbox.py --kind profile --sync <PROFILE_DIR> -- \
   bash tools/profile_kernel.sh profile_driver.py --output-dir <PROFILE_DIR>
 ```
 
+For AscendC (`vendor=ascend`, `arch=ascend910b1`), use `msprof` only through an
+orchestrator-provided, sandboxed Ascend profiling wrapper whose output is synced into `<PROFILE_DIR>`.
+If that path is not connected, do not guess a wrapper command, substitute NCU/rocprof, or invent
+counter values. Record `msprof unavailable` as an evidence limitation and proceed with honestly
+labeled static compiler evidence plus correctness/benchmark timing when the episode can still test
+its hypothesis.
+
 `profile_driver.py` imports the current `kernel.py`, builds real inputs from the campaign's immutable
 ground truth (`definition.json` + `workload.jsonl`, or `shapes.json` + `input.py`), warms up, and then
 invokes the candidate repeatedly. Select what it drives with environment variables rather than editing
@@ -82,11 +89,12 @@ PROFILE_ITERS=30 PROFILE_WORKLOAD_IDX=2 python tools/sandbox.py ...   # SOL: one
 PROFILE_ITERS=30 PROFILE_SHAPE_ID=3 python tools/sandbox.py ...       # Atrex-Bench: one shape
 ```
 
-Extract a concrete bottleneck and source-level target. Use PTX/SASS/TTGIR inspection when compiler
-lowering or instruction selection is part of the hypothesis. Do not make speculative optimization
-changes before obtaining usable evidence.
+Extract a concrete bottleneck and source-level target. Use PTX/SASS/TTGIR inspection on the backends
+that produce those artifacts; for AscendC, inspect only CANN/AscendC compiler artifacts actually
+exposed by the sandbox. Do not present a GPU ISA artifact as Ascend evidence. When `msprof` is
+unavailable, state that limitation beside the alternative evidence used for the hypothesis.
 
-Escalate through the typed profile funnel instead of collecting everything at once: `--profile-level
+On backends whose wrapper implements it, escalate through the typed profile funnel instead of collecting everything at once: `--profile-level
 survey` to enumerate kernels, `sol` (the default) for the bottleneck class, and `deep --kernel-regex
 '^<exact_base_function_name>$'` for one named kernel, especially a Triton `@triton.jit` entry. Take
 that name verbatim from the survey/SOL result; never guess a substring. Raw `.ncu-rep`/ATT artifacts
@@ -126,12 +134,22 @@ Search in this order and stop when one actionable direction is supported:
    operator, and profiler symptom. Use the architecture-scoped index before any broad grep:
 
    ```bash
-   python3 gpu-wiki/scripts/query.py --arch <arch> --vendor <nvidia|amd> \
+   python3 gpu-wiki/scripts/query.py --arch <arch> --vendor <nvidia|amd|ascend> \
      --area docs --section kernel-opt --symptom <controlled-symptom>
-   python3 gpu-wiki/scripts/query.py --arch <arch> --vendor <nvidia|amd> \
+   python3 gpu-wiki/scripts/query.py --arch <arch> --vendor <nvidia|amd|ascend> \
      --area docs --dsl <dsl> --operator <operator> --section ref-docs --section pitfalls
    python3 gpu-wiki/scripts/query.py <operator-or-mechanism> --arch <arch> \
-     --vendor <nvidia|amd> --dsl <dsl> --area reference-kernels --kind kernel
+     --vendor <nvidia|amd|ascend> --dsl <dsl> --area reference-kernels --kind kernel
+   ```
+
+   For Ascend 910B1, keep the L1 scope explicit in every retry:
+
+   ```bash
+   python3 gpu-wiki/scripts/query.py --arch ascend910b1 --vendor ascend \
+     --area docs --dsl ascendc --operator <operator> \
+     --section ref-docs --section pitfalls
+   python3 gpu-wiki/scripts/query.py <operator-or-mechanism> --arch ascend910b1 \
+     --vendor ascend --dsl ascendc --area reference-kernels --kind kernel
    ```
 
    Open the returned pages and follow their local links. `--symptom` accepts a controlled vocabulary:
@@ -145,10 +163,14 @@ Search in this order and stop when one actionable direction is supported:
 
    `--arch` takes an index token, which is not always the runtime arch string: `sm_90`, `sm_100`, and
    `sm_103` are rejected as `unknown-arch`. Pass the underscore-free form (`sm90`, `sm100`, `sm103`,
-   `sm120`, `gfx942`, `gfx950`) or the family name (`hopper`, `blackwell`, `cdna3`, `cdna4`), and run
+   `sm120`, `gfx942`, `gfx950`, `ascend910b1`) or the family name (`hopper`, `blackwell`, `cdna3`,
+   `cdna4`, `ascend910b`), and run
    `--list-arch` when a token is uncertain. An `unknown-arch` error is a token problem, never a reason
    to retry without `--arch`.
-2. `reference-projects/` only when the local wiki is insufficient.
+2. `reference-projects/` only when the local wiki is insufficient. For AscendC, search in strict
+   priority order: `ops-nn` -> `vllm-ascend` -> `cann-ops`. Treat any repository carrying the Ascend
+   Open Source Software License Agreement (OSLA) as **reference-only**: derive API and design patterns,
+   but do not copy code verbatim, import/load its implementation, or make it a candidate dependency.
 3. Public primary sources only when local sources do not answer the question.
 
 After repeated rejected episodes, expand across DSLs targeting the same architecture instead of
@@ -169,6 +191,14 @@ the whole direction.
 Modify only candidate source/metadata files allowed by policy. Compile and probe through the sandbox.
 On compile or correctness failure, diagnose and repair while the direction remains viable. Do not
 publish an intermediate checkpoint as a candidate.
+
+For an AscendC candidate, keep the evaluator-facing launch entry in `kernel.py` and list every
+self-authored kernel, tiling, or host-glue `.cpp`, `.h`, and `.asc` file in `solution.json.sources`.
+Those declared files are part of the candidate and may be edited; undeclared side files, prebuilt
+custom operators, and copied reference-project implementations are not. Do not impose CUDA's
+single-file/NVRTC layout on AscendC.
+Use preinstalled CANN compiler/build tools through the sandbox only for these declared self-authored
+sources. Do not install dependencies or build third-party/reference-project code.
 
 Land one optimization category per edit — vectorized load, swizzle, double buffering, tiling change,
 and so on — and attribute each edit as `evidence -> inference -> action`. Do not mix unrelated
@@ -192,8 +222,8 @@ and pre-converting stable weights (transpose, contiguous) is allowed because wei
 during evaluation.
 
 Before trusting a large delta — especially a regression beyond roughly 30% — re-run the same command
-on the same sandbox hardware and compare. GPU selection belongs to the gateway; never set a local
-`CUDA_VISIBLE_DEVICES` to steer it. Repeated development measurements are not promotion authority;
+on the same sandbox hardware and compare. Accelerator selection belongs to the gateway; never set a local
+`CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, or `ASCEND_RT_VISIBLE_DEVICES` to steer it. Repeated development measurements are not promotion authority;
 the supervisor reruns incumbent and candidate in one ABBA allocation.
 
 ### 7. Record every decisive experiment immediately

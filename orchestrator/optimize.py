@@ -28,13 +28,14 @@ Usage
     # single operator with an explicit framework:
     python orchestrator/optimize.py \
         --op-dir /path/to/operator \
-        --platform TARGET_GPU --sandbox-hardware REMOTE_GPU --framework CuteDSL \
+        --platform TARGET_ACCELERATOR --sandbox-hardware REMOTE_ACCELERATOR --framework CuteDSL \
         --agent-cli qodercli \
         --max-iters 20 --token-budget 8000000 --target-util 90
 
     # omit --framework to launch one independent campaign per supported framework:
     #   NVIDIA -> Triton, CuteDSL, Cuda
     #   AMD    -> Triton, FlyDSL
+    #   Ascend -> AscendC
     #   other  -> Triton
     python orchestrator/optimize.py \
         --op-dir /path/to/op --platform H20 --workspace /path/to/runs
@@ -85,6 +86,7 @@ try:
     from .hardware import (
         _workspace_slug,
         framework_workspace_suffix,
+        normalize_arch_token,
         supported_frameworks,
     )
     from .optimization_policy import OPTIMIZATION_MODE_CHOICES
@@ -108,6 +110,7 @@ except ImportError:  # direct script execution: python orchestrator/optimize.py
     from orchestrator.hardware import (  # type: ignore[no-redef]
         _workspace_slug,
         framework_workspace_suffix,
+        normalize_arch_token,
         supported_frameworks,
     )
     from orchestrator.optimization_policy import (  # type: ignore[no-redef]
@@ -317,11 +320,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "EVERYTHING op-specific is read from here — the workspace "
                          "name (dir basename), kernel to optimize (reference.py), and the full shape set. "
                          "Never hardcoded.")
-    ap.add_argument("--platform", required=True, help="Target hardware, e.g. B200 / H20 / MI308X "
-                                                      "(cannot be deduced from the op dir).")
+    ap.add_argument(
+        "--platform",
+        required=True,
+        help="Target hardware, e.g. B200 / H20 / MI308X / Ascend910B1 "
+             "(cannot be deduced from the op dir).",
+    )
     ap.add_argument(
         "--sandbox-hardware", default="",
-        help="agate GPU scheduler token used for all tests/profiles, e.g. REMOTE_GPU. "
+        help="agate accelerator scheduler token used for all tests/profiles, e.g. "
+             "REMOTE_ACCELERATOR. "
              "Default: --platform; set explicitly when the gateway uses a different alias.",
     )
     ap.add_argument(
@@ -356,9 +364,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     ap.add_argument(
         "--framework", default="",
-        help="Target DSL, e.g. Triton / CuteDSL / Cuda / FlyDSL. When omitted, launch all "
+        help="Target DSL, e.g. Triton / CuteDSL / Cuda / FlyDSL / AscendC. When omitted, launch all "
              "frameworks supported by the detected hardware in parallel: NVIDIA uses "
-             "Triton/CuteDSL/Cuda, AMD uses Triton/FlyDSL, and unknown hardware uses Triton. "
+             "Triton/CuteDSL/Cuda, AMD uses Triton/FlyDSL, Ascend uses AscendC, and unknown "
+             "hardware uses Triton. "
              "Each auto-dispatched production child is bound to its assigned framework.",
     )
     ap.add_argument("--notes", default="none", help="Extra constraints / known bottlenecks.")
@@ -398,8 +407,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "and performance parity, then optimization continues in Gluon. Default: 3; "
                          "0 disables conversion.")
     ap.add_argument("--arch", default="",
-                    help="Override the real runtime GPU arch, e.g. sm_103 or gfx942. Default: auto-detect "
-                         "via torch (get_device_capability / gcnArchName) — use this if auto-detect fails.")
+                    help="Override the real runtime accelerator arch, e.g. sm_103, gfx942, or "
+                         "ascend910b1. Ascend aliases such as 910B and Ascend910B1 are normalized. "
+                         "Default: auto-detect via torch/torch_npu, with npu-smi as an Ascend fallback.")
     ap.add_argument("--workspace", default="",
                     help="Working directory for the optimization campaign. A flat "
                          "kernel_opt_<name>_<framework>_<platform>/ workspace is created under this "
@@ -467,8 +477,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.workspace:
         Path(args.workspace).mkdir(parents=True, exist_ok=True)
 
-    arch = args.arch or detect_arch(
-        sandbox_hardware, args.sandbox_profile, args.sandbox_url
+    arch = (
+        normalize_arch_token(args.arch) or args.arch.strip()
+        if args.arch
+        else detect_arch(sandbox_hardware, args.sandbox_profile, args.sandbox_url)
     )
     op = _resolve_op(args.op_dir)
     ensure_submodules()
@@ -480,7 +492,8 @@ def main(argv: Optional[list[str]] = None) -> int:
           f"frameworks={','.join(frameworks)} "
           "runtime_arch="
           f"{arch or 'UNKNOWN (detect failed)'} "
-          f"(device name / vendor-smi may be desensitized; trusting the runtime API)", flush=True)
+          f"(device name / vendor-smi may be desensitized; trusting the normalized runtime probe)",
+          flush=True)
 
     if not args.framework:
         base = Path(args.workspace).resolve() if args.workspace else Path.cwd()

@@ -31,10 +31,12 @@ Examples:
 python3 gpu-wiki/scripts/query.py --arch a100 --area docs --section hardware-specs
 python3 gpu-wiki/scripts/query.py --arch h20 --area docs --section hardware-specs
 python3 gpu-wiki/scripts/query.py --arch pro5000 --area docs --section hardware-specs
+python3 gpu-wiki/scripts/query.py --arch 910b1 --area docs --section hardware-specs
 
 # Search an operator within an isolated architecture/DSL scope.
 python3 gpu-wiki/scripts/query.py "gdn" --arch sm120 --dsl cutedsl
 python3 gpu-wiki/scripts/query.py "flash attention" --arch mi308x --dsl flydsl
+python3 gpu-wiki/scripts/query.py "vector add" --arch 910b1 --dsl ascendc
 
 # Optional diagnostic filters.
 python3 gpu-wiki/scripts/query.py --arch b200 \
@@ -104,6 +106,8 @@ Accepted card aliases include:
 | RTX PRO 5000 / Pro5000 / SM120 | NVIDIA Blackwell GeForce/workstation |
 | MI300X / MI308X / gfx942 | AMD CDNA3 and product overlays |
 | MI355X / gfx950 | AMD CDNA4 |
+| Ascend 910B / Atlas A2 | Ascend 910B family |
+| Ascend 910B1 | Exact 910B1 product overlay |
 
 ## Hardware fact entry points
 
@@ -115,6 +119,7 @@ Accepted card aliases include:
 - [MI300X](docs/amd/cdna3/mi300x/hardware-specs/hardware_specs_mi300x.md)
 - [MI308X](docs/amd/cdna3/mi308x/hardware-specs/hardware_specs_mi308x.md)
 - [MI355X](docs/amd/cdna4/hardware-specs/hardware_specs_mi355x.md)
+- [Ascend 910B1](docs/ascend/ascend910b/ascend910b1/hardware-specs/hardware_specs_ascend910b1.md)
 
 ## Repository areas
 

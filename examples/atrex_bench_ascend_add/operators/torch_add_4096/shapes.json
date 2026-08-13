@@ -1,0 +1,11 @@
+{
+  "0": {
+    "init_kwargs": {},
+    "input_kwargs": {
+      "length": 4096,
+      "dtype": "float16",
+      "device": "npu:0"
+    }
+  }
+}
+
