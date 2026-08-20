@@ -53,7 +53,7 @@ same-allocation ABBA verification, and squash promotion; it is not a second CLI.
 │   └── prompts/                       # Setup, inspection, baseline, and episode prompts
 ├── long_horizon/                      # Episode worktrees, handoff protocol, ABBA verification
 ├── agents/                            # Baseline Agent definition injected into campaign workspaces
-├── skills/                            # Baseline runtime skill for Codex/Pi
+├── skills/                            # Runtime optimization and AscendC custom-op skills
 ├── tools/
 │   ├── sandbox.py                     # Gateway packaging and execution boundary
 │   ├── local_gateway.py               # Trusted localhost FIFO scheduler
@@ -62,7 +62,7 @@ same-allocation ABBA verification, and squash promotion; it is not a second CLI.
 ├── reference/                         # Workspace init, evaluator adapters, schema, SOL packaging
 ├── gpu-wiki/                          # Hardware and optimization knowledge base
 ├── reference-projects/                # Optional source-search repositories
-└── 3rdparty/                          # Humanize and profiler-analysis dependencies
+└── 3rdparty/                          # Humanize, profiler, and pinned CANN-SKILLS dependencies
 ```
 
 The `skills/` and `agents/` directories are internal runtime assets. The orchestrator links or
@@ -147,11 +147,14 @@ gateway.
 
 ### Workspace runtime assets
 
-`link_runtime()` exposes `tools/`, `reference/`, `skills/`, `reference-projects/`, and `gpu-wiki/`
+`link_runtime()` exposes `tools/`, `reference/`, `skills/`, `reference-projects/`, `gpu-wiki/`, and a
+read-only `cann-skills/` catalog root
 inside each campaign workspace. It also prepares backend-specific project-local discovery trees:
 
 - `.claude/` and `.qoder/` receive Agent definitions and knowledge skills;
 - `.agents/skills/` receives repository-scoped Codex/Pi optimization skills;
+- `ascendc-custom-pytorch-op` adapts the pinned CANN catalog and ops-transformer references to the
+  campaign's self-contained production policy without registering every generated operator card;
 - Humanize planning assets are hydrated locally without changing global user configuration.
 
 ### Sandbox and gateway

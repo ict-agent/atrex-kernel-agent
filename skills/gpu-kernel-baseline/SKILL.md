@@ -68,7 +68,9 @@ referenced below as `<gpu-wiki>/`.
 1. Implement a correct baseline based on PyTorch semantics and the learned framework APIs. For CuteDSL
    and FlyDSL the executable candidate remains in `kernel.py`. For AscendC, keep the evaluator-facing
    Python entry point in `kernel.py` and place only self-authored kernel/tiling/host glue in `.cpp`, `.h`,
-   or `.asc` files listed by relative path in `solution.json.sources`.
+   or `.asc` files listed by relative path in `solution.json.sources`. Before editing an AscendC
+   PyTorch binding, host tiling implementation, or Cube/Matmul launch path, invoke the repository-local
+   `ascendc-custom-pytorch-op` skill and follow its Atrex compatibility contract.
 2. Update `solution.json` languages and dependencies for the selected framework. An AscendC candidate's
    `sources` list must include `kernel.py` and every source/header needed to compile and launch it; do not
    rely on undeclared side files, prebuilt custom operators, or imported reference implementations.

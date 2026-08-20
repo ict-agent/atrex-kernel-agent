@@ -98,3 +98,7 @@
 [submodule "3rdparty/humanize"]
 	path = 3rdparty/humanize
 	url = https://github.com/PolyArch/humanize.git
+[submodule "3rdparty/cann-skills"]
+	path = 3rdparty/cann-skills
+	url = https://gitcode.com/cann-factory/CANN-SKILLS.git
+	shallow = true

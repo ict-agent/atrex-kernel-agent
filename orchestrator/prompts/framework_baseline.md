@@ -37,7 +37,9 @@ Hard rules for this session:
 - **AscendC campaigns may use declared multi-source candidates.** Keep the evaluator-facing Python entry
   point in `kernel.py`, and list every self-authored `.cpp`, `.h`, and `.asc` source required to compile or
   launch it in `solution.json.sources`. Undeclared side files and prebuilt operator binaries are not part of
-  the candidate and must not be loaded.
+  the candidate and must not be loaded. Before implementing an AscendC PyTorch binding, host tiling, or
+  Cube/Matmul launch path, use the repository-local `ascendc-custom-pytorch-op` skill; it adapts the pinned
+  `cann-skills/` catalog to this campaign's self-contained production policy.
 - **AscendC CANN 8.5 build contract:** the official fast-kernel-launch route may declare `CMakeLists.txt`
   alongside the self-authored sources and build it on first evaluator load. If Python build plumbing is
   needed, the only permitted process call is a direct literal argv such as

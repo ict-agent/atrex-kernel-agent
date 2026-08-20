@@ -31,7 +31,9 @@ the supervisor creates it after terminal validation.
 For an AscendC episode (`vendor=ascend`, `arch=ascend910b1`, `framework=AscendC`), the candidate may
 consist of the evaluator-facing `kernel.py` plus self-authored `.cpp`, `.h`, and `.asc` files. Every such
 file must be listed in `solution.json.sources`; undeclared files, prebuilt custom operators, and external
-implementations are outside candidate ownership.
+implementations are outside candidate ownership. Before changing an AscendC PyTorch binding, host tiling,
+or Cube/Matmul launch contract, use the repository-local `ascendc-custom-pytorch-op` skill and its pinned
+`cann-skills/` knowledge root.
 
 An AscendC candidate using CANN's CMake/Bisheng fast-launch route must also declare `CMakeLists.txt` in
 `solution.json.sources`. Candidate Python may run only direct, checked, literal-argv CMake commands:

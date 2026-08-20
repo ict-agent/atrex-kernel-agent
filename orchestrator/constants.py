@@ -17,6 +17,7 @@ PROFILE_DRIVER = REPO_ROOT / "reference" / "profile_driver.py"
 SANDBOX_TOOL = REPO_ROOT / "tools" / "sandbox.py"
 SANDBOX_DIRECTIVE_PROMPT = PROMPTS_DIR / "sandbox_directive.md"
 HUMANIZE_DIR = REPO_ROOT / "3rdparty" / "humanize"
+CANN_SKILLS_DIR = REPO_ROOT / "3rdparty" / "cann-skills"
 CONVERT_PERF_TOL = 0.05   # triton->gluon is a direct translation: gluon must be within +5% of triton
 DEFAULT_CONVERT_AFTER = 3     # mandatory Triton->Gluon escalation after three consecutive stalls
 DEFAULT_HANDOFF_RESUMES = 2

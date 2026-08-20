@@ -17,7 +17,8 @@ AKA exposes one supported execution path: the unattended, budget-bounded orchest
   `tools/profile_ascend.sh`
 
 The orchestrator verifies required submodules and `jq` before starting. Missing required submodules
-are initialized automatically; the large `reference-projects/` collection remains optional.
+are initialized automatically, including the pinned CANN-SKILLS catalog; the large
+`reference-projects/` collection remains optional.
 
 ## 1. Clone the Repository
 

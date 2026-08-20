@@ -199,6 +199,9 @@ self-authored kernel, tiling, or host-glue `.cpp`, `.h`, and `.asc` file in `sol
 Those declared files are part of the candidate and may be edited; undeclared side files, prebuilt
 custom operators, and copied reference-project implementations are not. Do not impose CUDA's
 single-file/NVRTC layout on AscendC.
+Before changing an AscendC PyTorch binding, host tiling, or Cube/Matmul launch contract, invoke the
+repository-local `ascendc-custom-pytorch-op` skill. Use its pinned `cann-skills/` catalog progressively;
+do not register or load the full generated operator-card tree.
 Use preinstalled CANN compiler/build tools through the sandbox only for these declared self-authored
 sources. Do not install dependencies or build third-party/reference-project code.
 

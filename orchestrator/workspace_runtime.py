@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .constants import HUMANIZE_DIR, REPO_ROOT, STALL_STATE_FILE
+from .constants import CANN_SKILLS_DIR, HUMANIZE_DIR, REPO_ROOT, STALL_STATE_FILE
 
 
 def _install_agent_humanize_skill(skills_dir: Path) -> None:
@@ -60,7 +60,7 @@ def _agent_runtime_directive(agent_cli: str) -> str:
         syntax = "Codex's `$skill-name` syntax" if agent_cli == "codex" else "Pi's `/skill:name` syntax"
         return (
             f"- `.agents/skills/` — repository-local {agent_cli} skills, including "
-            "`gpu-kernel-baseline`, `gpu-kernel-episode-loop`, `ncu-report-skill`, "
+            "`gpu-kernel-baseline`, `gpu-kernel-episode-loop`, `ascendc-custom-pytorch-op`, `ncu-report-skill`, "
             f"`KernelWiki`, and `humanize-gen-plan`. Invoke a named skill with {syntax}."
         )
     return (
@@ -142,6 +142,11 @@ def link_runtime(workspace: Path, atrex_bench_root: Optional[Path] = None) -> No
         src, dst = REPO_ROOT / sub, workspace / sub
         if src.exists() and not dst.exists():
             os.symlink(src, dst)
+    # CANN-SKILLS is a large upstream catalog. Expose one read-only root for progressive,
+    # task-specific loading; do not register its 1,000+ operator cards as top-level skills.
+    cann_skills_link = workspace / "cann-skills"
+    if CANN_SKILLS_DIR.is_dir() and not cann_skills_link.exists():
+        os.symlink(CANN_SKILLS_DIR, cann_skills_link)
     if atrex_bench_root is not None:
         evaluator = atrex_bench_root / "scripts" / "run_eval.py"
         package = atrex_bench_root / "src" / "atrex_bench"
@@ -176,6 +181,10 @@ def link_runtime(workspace: Path, atrex_bench_root: Optional[Path] = None) -> No
             dst = runtime_skills_dir / name
             if src.exists() and not dst.exists():
                 os.symlink(src, dst)
+        ascend_custom_op_skill = REPO_ROOT / "skills" / "ascendc-custom-pytorch-op"
+        custom_op_destination = runtime_skills_dir / "ascendc-custom-pytorch-op"
+        if ascend_custom_op_skill.is_dir() and not custom_op_destination.exists():
+            os.symlink(ascend_custom_op_skill, custom_op_destination)
         # Claude/Qoder setup prompts can launch the baseline agent by name.
         if agents_src.exists() and not runtime_agents_dir.exists():
             os.symlink(agents_src, runtime_agents_dir)
@@ -209,6 +218,7 @@ def link_runtime(workspace: Path, atrex_bench_root: Optional[Path] = None) -> No
         "/skills",
         "/reference-projects",
         "/gpu-wiki",
+        "/cann-skills",
     ]
     missing_runtime_ignores = [
         entry for entry in runtime_ignores if entry not in existing_lines

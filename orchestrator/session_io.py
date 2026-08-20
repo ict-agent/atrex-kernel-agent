@@ -21,6 +21,7 @@ from typing import Optional
 
 from . import agent_runtime as _agent_runtime
 from .constants import (
+    CANN_SKILLS_DIR,
     DEFAULT_SANDBOX_TIMEOUT,
     DEPENDENCY_REVIEW_SCHEMA_VERSION,
     HUMANIZE_DIR,
@@ -159,7 +160,8 @@ def ensure_jq() -> str:
 def ensure_submodules() -> None:
     """Initialize submodules and host tools required by the optimization pipeline.
 
-    Covers: gpu-wiki/3rdparty (KernelWiki), 3rdparty/ncu-report-skill, 3rdparty/humanize.
+    Covers: gpu-wiki/3rdparty (KernelWiki), 3rdparty/ncu-report-skill, 3rdparty/humanize,
+    and 3rdparty/cann-skills.
     Skips reference-projects (large, optional — only needed for L2 search).
     Idempotent: already-initialized submodules are untouched.
     """
@@ -167,6 +169,10 @@ def ensure_submodules() -> None:
         ("gpu-wiki/3rdparty/", REPO_ROOT / "gpu-wiki" / "3rdparty" / "KernelWiki" / "README.md"),
         ("3rdparty/ncu-report-skill", REPO_ROOT / "3rdparty" / "ncu-report-skill" / "SKILL.md"),
         ("3rdparty/humanize", HUMANIZE_DIR / "skills" / "humanize-gen-plan" / "SKILL.md"),
+        (
+            "3rdparty/cann-skills",
+            CANN_SKILLS_DIR / "skills" / "tutorial" / "cann-op-scaffold" / "SKILL.md",
+        ),
     ]
     to_init = [path for path, marker in needed if not marker.exists()]
     if to_init:
