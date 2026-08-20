@@ -26,20 +26,26 @@ git clone https://github.com/alibaba/atrex-kernel-agent.git
 cd atrex-kernel-agent
 ```
 
-For AscendC generation, initialize the pinned CANN 8.5 reference corpus explicitly; the orchestrator
-does not download optional reference projects automatically:
+For AscendC generation, initialize the pinned Ascend reference corpus explicitly; the four CANN
+operator repositories are pinned to their 8.5 maintenance lines. The orchestrator does not download
+optional reference projects automatically:
 
 ```bash
 git submodule update --init --depth 1 \
+  reference-projects/ops-math \
   reference-projects/ops-nn \
+  reference-projects/ops-transformer \
+  reference-projects/ops-cv \
   reference-projects/vllm-ascend \
-  reference-projects/cann-ops
+  reference-projects/cann-recipes-infer
 ```
 
-Search these references in the same order: `ops-nn`, then `vllm-ascend`, then the historical
-`cann-ops`. Do not use `git submodule update --remote`, because the repository gitlinks pin versions
-chosen for CANN 8.5. See [`reference-projects/README.md`](../reference-projects/README.md) for exact
-pins and license/provenance constraints.
+Search the CANN 8.5 repository matching the operator class first: `ops-math`, `ops-nn`,
+`ops-transformer`, or `ops-cv`. Use `vllm-ascend` and `cann-recipes-infer` for runtime and
+end-to-end inference integration evidence. Do not use `git submodule update --remote`, because the
+repository gitlinks pin reviewed versions. See
+[`reference-projects/README.md`](../reference-projects/README.md) for exact pins and
+license/provenance constraints.
 
 `--op-dir` supports two evaluator-owned layouts:
 

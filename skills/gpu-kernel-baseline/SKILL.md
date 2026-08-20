@@ -54,10 +54,12 @@ referenced below as `<gpu-wiki>/`.
      --vendor ascend --dsl ascendc --area reference-kernels --kind kernel
    ```
 
-6. If L1 does not yield an actionable AscendC pattern, search L2 under `reference-projects/` in this
-   order: `ops-nn` -> `vllm-ascend` -> `cann-ops`. Repositories carrying the Ascend Open Source
-   Software License Agreement (OSLA) are **reference-only**: learn API usage and organization, but do
-   not copy code verbatim, load their implementations, or declare them as candidate dependencies.
+6. If L1 does not yield an actionable AscendC pattern, search L2 under `reference-projects/`. Start
+   with the CANN 8.5 repository matching the operator class (`ops-math`, `ops-nn`,
+   `ops-transformer`, or `ops-cv`), then use `vllm-ascend` and `cann-recipes-infer` for runtime and
+   inference-integration patterns. Repositories carrying the Ascend Open Source Software License
+   Agreement (OSLA) are **reference-only**: learn API usage and organization, but do not copy code
+   verbatim, load their implementations, or declare them as candidate dependencies.
 7. Record learned wiki paths, reference-project paths, API constraints, hardware constraints, and
    pitfalls in `plans/v0_plan.md` for implementation and reporting.
 

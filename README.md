@@ -127,9 +127,12 @@ Reference kernel projects (`reference-projects/`):
 - [aiter](https://github.com/ROCm/aiter) — ROCm AIter
 - [quack](https://github.com/Dao-AILab/quack) — Dao-AILab Quack
 - [tilelang](https://github.com/tile-ai/tilelang) — TileLang
+- [ops-math](https://gitcode.com/cann/ops-math) — release-aligned CANN mathematical operators and AscendC examples
 - [ops-nn](https://gitcode.com/cann/ops-nn) — release-aligned CANN neural-network operators and AscendC examples
+- [ops-transformer](https://gitcode.com/cann/ops-transformer) — release-aligned CANN Transformer operators
+- [ops-cv](https://gitcode.com/cann/ops-cv) — release-aligned CANN computer-vision operators
 - [vllm-ascend](https://github.com/vllm-project/vllm-ascend) — vLLM integration and LLM custom operators for Ascend
-- [cann-ops](https://gitee.com/ascend/cann-ops) — historical CANN operator implementation patterns
+- [cann-recipes-infer](https://gitcode.com/cann/cann-recipes-infer) — CANN LLM and multimodal inference optimization recipes
 
 Knowledge base and tooling (`gpu-wiki/3rdparty/`, `3rdparty/`):
 

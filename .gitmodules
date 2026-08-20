@@ -62,17 +62,29 @@
 	path = reference-projects/tilelang
 	url = https://github.com/tile-ai/tilelang.git
 	shallow = false
-[submodule "reference-projects/cann-ops"]
-	path = reference-projects/cann-ops
-	url = https://gitee.com/ascend/cann-ops.git
+[submodule "reference-projects/ops-math"]
+	path = reference-projects/ops-math
+	url = https://gitcode.com/cann/ops-math.git
 	shallow = true
 [submodule "reference-projects/ops-nn"]
 	path = reference-projects/ops-nn
 	url = https://gitcode.com/cann/ops-nn.git
 	shallow = true
+[submodule "reference-projects/ops-transformer"]
+	path = reference-projects/ops-transformer
+	url = https://gitcode.com/cann/ops-transformer.git
+	shallow = true
+[submodule "reference-projects/ops-cv"]
+	path = reference-projects/ops-cv
+	url = https://gitcode.com/cann/ops-cv.git
+	shallow = true
 [submodule "reference-projects/vllm-ascend"]
 	path = reference-projects/vllm-ascend
 	url = https://github.com/vllm-project/vllm-ascend.git
+	shallow = true
+[submodule "reference-projects/cann-recipes-infer"]
+	path = reference-projects/cann-recipes-infer
+	url = https://gitcode.com/cann/cann-recipes-infer.git
 	shallow = true
 [submodule "gpu-wiki/3rdparty/KernelWiki"]
 	path = gpu-wiki/3rdparty/KernelWiki

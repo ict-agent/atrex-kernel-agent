@@ -42,10 +42,11 @@ candidate manifest.
 
 ## CANN examples are versioned API evidence
 
-An implementation from a newer ops-nn or vLLM Ascend release may compile
-against APIs absent from CANN 8.5. Conversely, the migrated `cann-ops` master is
-not a release-matched ABI definition. Pin reference repositories and toolchain
-versions before generation.
+An implementation from a newer CANN operator repository, vLLM Ascend, or
+cann-recipes-infer release may compile against APIs absent from CANN 8.5. Pin
+the `ops-math`, `ops-nn`, `ops-transformer`, and `ops-cv` reference repositories
+to the deployed maintenance line, and pin integration repositories and
+toolchain versions before generation.
 
 ## No profiler artifact means no profiler conclusion
 
@@ -59,4 +60,3 @@ same-device measurements. Do not translate NCU metrics mechanically to AIC/AIV.
 - [Kernel type configuration](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0218.html)
 - [Matmul API constraints](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0614.html)
 - [TCubeTiling capacity equations](https://www.hiascend.com/document/detail/en/canncommercial/850/API/ascendcopapi/atlasascendc_api_07_0673.html)
-

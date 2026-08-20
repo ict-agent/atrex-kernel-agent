@@ -21,16 +21,18 @@ Use this checklist before accepting an agent-generated AscendC candidate.
 
 ## 3. Search release-matched examples
 
-Search sources in this order:
+Search the release-matched source for the operator class first:
 
-1. `reference-projects/ops-nn` on the deployed CANN maintenance line: production
-   `op_host/` + `op_kernel/` patterns and `examples/add_example/`.
+1. `reference-projects/ops-math`, `ops-nn`, `ops-transformer`, or `ops-cv` on
+   the deployed CANN maintenance line: production `op_host/` + `op_kernel/`
+   patterns and paired examples.
 2. `reference-projects/vllm-ascend` at the matching release: LLM integration,
    Python registration, packaging, and workload-specific custom operators.
-3. `reference-projects/cann-ops`: historical patterns only; its migrated master
-   branch is not the CANN 8.5 ABI authority.
+3. `reference-projects/cann-recipes-infer`: end-to-end LLM and multimodal
+   inference optimization patterns; validate its APIs against the deployed
+   CANN release before use.
 
-The first two CANN repositories have hardware-limited CANN Open Software
+The four CANN operator repositories have hardware-limited CANN Open Software
 licenses. Learn patterns and APIs; do not copy blocks verbatim without a
 separate license/provenance review.
 
@@ -61,4 +63,3 @@ separate license/provenance review.
 - [AscendC programming model](../../ref-docs/ascendc/programming-model.md)
 - [msProf operator profiling](https://www.hiascend.com/document/detail/en/canncommercial/850/devaids/optool/atlasopdev_16_0082.html)
 - [msKPP performance analysis](https://www.hiascend.com/document/detail/en/canncommercial/850/devaids/optool/atlasopdev_16_0006.html)
-

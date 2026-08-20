@@ -69,11 +69,12 @@ profiling gap explicitly and continue only with honestly labeled static, compile
 evidence; never invent `msprof` metrics or translate NCU/rocprof fields into Ascend results.
 
 For AscendC research, keep L1 architecture-scoped with `--arch ascend910b1 --vendor ascend --dsl ascendc`;
-do not drop those filters to manufacture a hit. If L1 is insufficient, search L2 in strict order:
-`reference-projects/ops-nn` -> `reference-projects/vllm-ascend` -> `reference-projects/cann-ops`.
-Repositories carrying the Ascend Open Source Software License Agreement (OSLA) are reference-only:
-derive API/design patterns, but do not copy code verbatim, load their implementation, or make them a
-candidate dependency.
+do not drop those filters to manufacture a hit. If L1 is insufficient, start L2 with the CANN 8.5
+repository matching the operator class (`reference-projects/ops-math`, `ops-nn`, `ops-transformer`,
+or `ops-cv`), then use `reference-projects/vllm-ascend` and `cann-recipes-infer` for runtime and
+inference-integration patterns. Repositories carrying the Ascend Open Source Software License
+Agreement (OSLA) are reference-only: derive API/design patterns, but do not copy code verbatim, load
+their implementation, or make them a candidate dependency.
 
 ## Framework escalation state
 

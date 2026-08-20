@@ -64,10 +64,12 @@ You will receive:
      --vendor ascend --dsl ascendc --area reference-kernels --kind kernel
    ```
 
-6. Only when L1 is insufficient, search Ascend reference projects in this order:
-   `ops-nn` → `vllm-ascend` → `cann-ops`. A repository carrying the Ascend Open Source Software
-   License Agreement (OSLA) is **reference-only**: learn its API usage and structure, but do not copy
-   source verbatim, load its implementation, or add it as a candidate dependency.
+6. Only when L1 is insufficient, start with the CANN 8.5 reference repository matching the operator
+   class (`ops-math`, `ops-nn`, `ops-transformer`, or `ops-cv`), then use `vllm-ascend` and
+   `cann-recipes-infer` for runtime and inference-integration patterns. A repository carrying the
+   Ascend Open Source Software License Agreement (OSLA) is **reference-only**: learn its API usage and
+   structure, but do not copy source verbatim, load its implementation, or add it as a candidate
+   dependency.
 7. Record learned wiki/reference paths, API constraints, hardware constraints, and pitfalls in
    `plans/v0_plan.md` for implementation and reporting.
 

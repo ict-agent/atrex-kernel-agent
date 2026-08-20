@@ -131,11 +131,12 @@ dtypes, layouts, and the full shape set you must cover.
    - **L1 (gpu-wiki)**: architecture-scoped `gpu-wiki/docs/` first, then `gpu-wiki/reference-kernels/`. Only
      after those P0-P4 sources are insufficient, use the runtime's available `KernelWiki` skill or
      `gpu-wiki/3rdparty/` as P5 sources for NVIDIA SM90/SM100.
-   - **L2 (reference-projects)**: Only if L1 yields no new actionable path. Search relevant modules in
-     `reference-projects/` for implementation patterns. For AscendC, search in this order:
-     `ops-nn` -> `vllm-ascend` -> `cann-ops`. Treat repositories distributed under the Ascend Open Source
-     Software License Agreement (OSLA) as **reference-only**: learn API usage and structural patterns, but
-     do not copy source verbatim, load their implementations, or turn them into candidate dependencies.
+   - **L2 (reference-projects)**: Only if L1 yields no new actionable path. For AscendC, start with the
+     CANN 8.5 repository matching the operator class (`ops-math`, `ops-nn`, `ops-transformer`, or
+     `ops-cv`), then use `vllm-ascend` and `cann-recipes-infer` for runtime and inference-integration
+     patterns. Treat repositories distributed under the Ascend Open Source Software License Agreement
+     (OSLA) as **reference-only**: learn API usage and structural patterns, but do not copy source
+     verbatim, load their implementations, or turn them into candidate dependencies.
    - **L3 (public web)**: Only if L1+L2 yield nothing new. Use web search for papers, docs, or community posts.
 4. **Stop early**: once you have **one** viable implementation approach with a concrete reference, start
    implementing. Do not exhaustively search all layers.

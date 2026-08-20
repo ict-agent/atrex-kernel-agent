@@ -167,10 +167,12 @@ Search in this order and stop when one actionable direction is supported:
    `cdna4`, `ascend910b`), and run
    `--list-arch` when a token is uncertain. An `unknown-arch` error is a token problem, never a reason
    to retry without `--arch`.
-2. `reference-projects/` only when the local wiki is insufficient. For AscendC, search in strict
-   priority order: `ops-nn` -> `vllm-ascend` -> `cann-ops`. Treat any repository carrying the Ascend
-   Open Source Software License Agreement (OSLA) as **reference-only**: derive API and design patterns,
-   but do not copy code verbatim, import/load its implementation, or make it a candidate dependency.
+2. `reference-projects/` only when the local wiki is insufficient. For AscendC, start with the CANN
+   8.5 repository matching the operator class (`ops-math`, `ops-nn`, `ops-transformer`, or `ops-cv`),
+   then use `vllm-ascend` and `cann-recipes-infer` for runtime and inference-integration patterns.
+   Treat any repository carrying the Ascend Open Source Software License Agreement (OSLA) as
+   **reference-only**: derive API and design patterns, but do not copy code verbatim, import/load its
+   implementation, or make it a candidate dependency.
 3. Public primary sources only when local sources do not answer the question.
 
 After repeated rejected episodes, expand across DSLs targeting the same architecture instead of
